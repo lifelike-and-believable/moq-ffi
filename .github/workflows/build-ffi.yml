@@ -19,6 +19,8 @@ jobs:
   windows-msvc:
     name: Windows (MSVC) Release
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       RUSTFLAGS: -C target-feature=+crt-static
       CARGO_TERM_COLOR: always
@@ -74,6 +76,8 @@ jobs:
   linux-gnu:
     name: Linux (GNU) Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -122,6 +126,8 @@ jobs:
   macos-universal:
     name: MacOS (Universal) Release
     runs-on: macos-latest
+    permissions:
+      contents: read
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -189,6 +195,8 @@ jobs:
     if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
     needs: [windows-msvc, linux-gnu, macos-universal]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download Windows SDK artifact
         uses: actions/download-artifact@v4
