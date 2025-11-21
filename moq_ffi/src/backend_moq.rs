@@ -17,7 +17,13 @@ use once_cell::sync::Lazy;
 //     session::{Publisher as MoqTransportPublisher, Subscriber as MoqTransportSubscriber},
 // };
 
-// Global tokio runtime for async operations (will be used when implementing actual MoQ transport)
+// Global tokio runtime for async operations
+// Currently this provides the infrastructure for future async MoQ transport operations.
+// When fully integrated with moq-transport, this will be used to:
+// - Handle async WebTransport/QUIC connections
+// - Process incoming/outgoing messages
+// - Manage track readers/writers
+// For now, the synchronous API provides immediate feedback for testing and integration.
 #[allow(dead_code)]
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     Runtime::new().expect("Failed to create tokio runtime")
@@ -552,11 +558,21 @@ pub extern "C" fn moq_version() -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn moq_last_error() -> *const c_char {
+    // Note: This returns a pointer that is valid until the next error occurs
+    // in this thread. The caller should NOT free this pointer.
+    // This is a common pattern in C FFI for error reporting.
     match get_last_error() {
         Some(err) => {
-            // Leak the string so it stays valid until next error or program exit
-            let c_str = CString::new(err).unwrap_or_else(|_| CString::new("Unknown error").unwrap());
-            c_str.into_raw()
+            // Create a static string that we'll reuse per thread
+            thread_local! {
+                static ERROR_BUF: std::cell::RefCell<Option<CString>> = std::cell::RefCell::new(None);
+            }
+            
+            ERROR_BUF.with(|buf| {
+                let c_str = CString::new(err).unwrap_or_else(|_| CString::new("Unknown error").unwrap());
+                *buf.borrow_mut() = Some(c_str);
+                buf.borrow().as_ref().unwrap().as_ptr()
+            })
         }
         None => std::ptr::null(),
     }
