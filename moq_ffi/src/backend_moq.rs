@@ -196,6 +196,8 @@ pub unsafe extern "C" fn moq_create_publisher(
 #[no_mangle]
 pub unsafe extern "C" fn moq_publisher_destroy(publisher: *mut MoqPublisher) {
     if !publisher.is_null() {
+        // TODO: Implement proper cleanup when full backend is complete
+        // Currently moq_create_publisher returns null, so this won't be reached
         let _ = Box::from_raw(publisher);
     }
 }
@@ -242,6 +244,8 @@ pub unsafe extern "C" fn moq_subscribe(
 #[no_mangle]
 pub unsafe extern "C" fn moq_subscriber_destroy(subscriber: *mut MoqSubscriber) {
     if !subscriber.is_null() {
+        // TODO: Implement proper cleanup when full backend is complete
+        // Currently moq_subscribe returns null, so this won't be reached
         let _ = Box::from_raw(subscriber);
     }
 }
