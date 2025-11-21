@@ -1,0 +1,64 @@
+[package]
+name = "moq_ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "FFI layer for MoQ Transport - C ABI wrapper for moq-transport"
+authors = ["Lifelike & Believable"]
+
+[lib]
+# Build both a static library and a Windows DLL (with import lib)
+crate-type = ["staticlib", "cdylib"]
+
+# ───────────────────────────────────────────────
+# Features
+# ───────────────────────────────────────────────
+[features]
+# Enable full MoQ transport integration
+with_moq = [
+    "dep:moq-transport",
+    "dep:web-transport",
+    "dep:tokio",
+    "dep:anyhow",
+    "dep:once_cell",
+    "dep:futures"
+]
+
+# ───────────────────────────────────────────────
+# Dependencies
+# ───────────────────────────────────────────────
+[dependencies]
+# MoQ transport stack
+moq-transport = { version = "0.11", optional = true }
+web-transport = { version = "0.8", optional = true }
+
+# Async runtime and utilities
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time"], optional = true }
+once_cell = { version = "1.19", optional = true }
+anyhow = { version = "1.0", optional = true }
+futures = { version = "0.3", optional = true }
+
+# ───────────────────────────────────────────────
+# Build profile
+# ───────────────────────────────────────────────
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+# ───────────────────────────────────────────────
+# Metadata for documentation & CI
+# ───────────────────────────────────────────────
+[package.metadata]
+repository = "https://github.com/lifelike-and-believable/moq-ffi"
+readme = "../README.md"
+
+# ───────────────────────────────────────────────
+# Notes
+# ───────────────────────────────────────────────
+# - `cargo build --release`             → builds stub backend (no MoQ)
+# - `cargo build --release --features with_moq`
+#       → builds full implementation
+# - Works across Win/Mac/Linux with MSVC, clang, or gcc as backend C++ compiler.

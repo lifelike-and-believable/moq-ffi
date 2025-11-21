@@ -1,0 +1,237 @@
+name: Build MoQ FFI SDK
+
+on:
+  push:
+    paths:
+      - 'moq_ffi/**'
+      - 'tools/**'
+      - '.github/workflows/build-ffi.yml'
+  pull_request:
+    paths:
+      - 'moq_ffi/**'
+      - 'tools/**'
+      - '.github/workflows/build-ffi.yml'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  windows-msvc:
+    name: Windows (MSVC) Release
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.87.0 (MSVC)
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.87.0
+          profile: minimal
+          target: x86_64-pc-windows-msvc
+          override: true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            moq_ffi
+
+      - name: Build (Release, with_moq)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cd moq_ffi
+          cargo build --release --features with_moq
+
+      - name: Package SDK (headers + libs + dll + pdb)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File "tools/package.ps1" -CrateDir "moq_ffi" -OutDir "artifacts/windows-x64"
+
+      - name: Upload artifact (SDK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moq-ffi-sdk-windows-x64
+          path: |
+            artifacts/windows-x64/**
+
+      - name: Package Plugin Layout (ThirdParty + Binaries)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File "tools/package-plugin.ps1" -CrateDir "moq_ffi" -OutDir "artifacts/plugin-windows-x64" -ThirdPartyName "moq_ffi"
+
+      - name: Upload artifact (PluginLayout)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moq-ffi-plugin-windows-x64
+          path: |
+            artifacts/plugin-windows-x64/**
+
+  linux-gnu:
+    name: Linux (GNU) Release
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Rust 1.87.0
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.87.0
+          profile: minimal
+          target: x86_64-unknown-linux-gnu
+          override: true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            moq_ffi
+
+      - name: Build (Release, with_moq)
+        run: |
+          cd moq_ffi
+          cargo build --release --features with_moq
+
+      - name: Package SDK (headers + libs)
+        run: |
+          mkdir -p artifacts/linux-x64/include
+          mkdir -p artifacts/linux-x64/lib
+          cp moq_ffi/include/*.h artifacts/linux-x64/include/
+          cp moq_ffi/target/release/libmoq_ffi.so artifacts/linux-x64/lib/ || true
+          cp moq_ffi/target/release/libmoq_ffi.a artifacts/linux-x64/lib/ || true
+
+      - name: Upload artifact (SDK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moq-ffi-sdk-linux-x64
+          path: |
+            artifacts/linux-x64/**
+
+  macos-universal:
+    name: MacOS (Universal) Release
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.87.0
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.87.0
+          profile: minimal
+          override: true
+
+      - name: Install targets
+        run: |
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            moq_ffi
+
+      - name: Build x86_64 (Release, with_moq)
+        run: |
+          cd moq_ffi
+          cargo build --release --features with_moq --target x86_64-apple-darwin
+
+      - name: Build aarch64 (Release, with_moq)
+        run: |
+          cd moq_ffi
+          cargo build --release --features with_moq --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p artifacts/macos-universal/include
+          mkdir -p artifacts/macos-universal/lib
+          cp moq_ffi/include/*.h artifacts/macos-universal/include/
+          
+          # Create universal dylib
+          if [ -f moq_ffi/target/x86_64-apple-darwin/release/libmoq_ffi.dylib ] && [ -f moq_ffi/target/aarch64-apple-darwin/release/libmoq_ffi.dylib ]; then
+            lipo -create \
+              moq_ffi/target/x86_64-apple-darwin/release/libmoq_ffi.dylib \
+              moq_ffi/target/aarch64-apple-darwin/release/libmoq_ffi.dylib \
+              -output artifacts/macos-universal/lib/libmoq_ffi.dylib
+          fi
+          
+          # Create universal static lib
+          if [ -f moq_ffi/target/x86_64-apple-darwin/release/libmoq_ffi.a ] && [ -f moq_ffi/target/aarch64-apple-darwin/release/libmoq_ffi.a ]; then
+            lipo -create \
+              moq_ffi/target/x86_64-apple-darwin/release/libmoq_ffi.a \
+              moq_ffi/target/aarch64-apple-darwin/release/libmoq_ffi.a \
+              -output artifacts/macos-universal/lib/libmoq_ffi.a
+          fi
+
+      - name: Upload artifact (SDK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moq-ffi-sdk-macos-universal
+          path: |
+            artifacts/macos-universal/**
+
+  release-assets:
+    if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+    needs: [windows-msvc, linux-gnu, macos-universal]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows SDK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moq-ffi-sdk-windows-x64
+          path: artifacts/windows-x64
+
+      - name: Download Windows Plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moq-ffi-plugin-windows-x64
+          path: artifacts/plugin-windows-x64
+
+      - name: Download Linux SDK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moq-ffi-sdk-linux-x64
+          path: artifacts/linux-x64
+
+      - name: Download MacOS SDK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moq-ffi-sdk-macos-universal
+          path: artifacts/macos-universal
+
+      - name: Create zip files
+        run: |
+          cd artifacts/windows-x64
+          zip -r ../moq-ffi-sdk-windows-x64.zip .
+          cd ../plugin-windows-x64
+          zip -r ../moq-ffi-plugin-windows-x64.zip .
+          cd ../linux-x64
+          tar czf ../moq-ffi-sdk-linux-x64.tar.gz .
+          cd ../macos-universal
+          tar czf ../moq-ffi-sdk-macos-universal.tar.gz .
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/moq-ffi-sdk-windows-x64.zip
+            artifacts/moq-ffi-plugin-windows-x64.zip
+            artifacts/moq-ffi-sdk-linux-x64.tar.gz
+            artifacts/moq-ffi-sdk-macos-universal.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
