@@ -30,9 +30,16 @@ use moq_ffi::*;
 fn init_crypto_provider() {
     use rustls::crypto::CryptoProvider;
     // Install default provider (aws-lc-rs) if not already installed
-    let _ = CryptoProvider::install_default(
-        rustls::crypto::aws_lc_rs::default_provider()
-    );
+    // Returns Ok(()) if installed successfully, Err if already installed
+    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
+        Ok(()) => {
+            println!("CryptoProvider installed successfully");
+        }
+        Err(_) => {
+            // Already installed, this is fine
+            println!("CryptoProvider already installed");
+        }
+    }
 }
 
 // Cloudflare relay URL (production)
