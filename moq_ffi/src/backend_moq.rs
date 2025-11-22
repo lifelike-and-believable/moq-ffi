@@ -69,7 +69,7 @@ struct ClientInner {
     publisher: Option<MoqTransportPublisher>,
     subscriber: Option<MoqTransportSubscriber>,
     connection_callback: MoqConnectionCallback,
-    connection_user_data: *mut std::ffi::c_void,
+    connection_user_data: usize, // Store as usize for Send safety
     // Track announced namespaces
     announced_namespaces: HashMap<TrackNamespace, TracksWriter>,
     // Handle to session run task
@@ -204,7 +204,7 @@ pub extern "C" fn moq_client_create() -> *mut MoqClient {
             publisher: None,
             subscriber: None,
             connection_callback: None,
-            connection_user_data: std::ptr::null_mut(),
+            connection_user_data: 0,
             announced_namespaces: HashMap::new(),
             session_task: None,
         })),
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn moq_connect(
 
     // Store connection callback
     inner.connection_callback = connection_callback;
-    inner.connection_user_data = user_data;
+    inner.connection_user_data = user_data as usize;
     inner.url = Some(url_str.clone());
 
     // Notify connecting state
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn moq_connect(
 
         // Notify connection success via callback
         if let Some(callback) = inner.connection_callback {
-            callback(inner.connection_user_data, MoqConnectionState::MoqStateConnected);
+            callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateConnected);
         }
 
         // Spawn task to run the session
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn moq_disconnect(client: *mut MoqClient) -> MoqResult {
 
     // Notify disconnected state
     if let Some(callback) = inner.connection_callback {
-        callback(inner.connection_user_data, MoqConnectionState::MoqStateDisconnected);
+        callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateDisconnected);
     }
 
     log::info!("Disconnected from MoQ server");
@@ -483,24 +483,8 @@ pub unsafe extern "C" fn moq_announce_namespace(
         }
     };
 
-    // Check if already announced
-    let track_namespace = TrackNamespace::try_from(namespace_str.as_str())
-        .map_err(|e| {
-            set_last_error(format!("Invalid namespace format: {}", e));
-            make_error_result(
-                MoqResultCode::MoqErrorInvalidArgument,
-                "Invalid namespace format",
-            )
-        })
-        .ok();
-    
-    let track_namespace = match track_namespace {
-        Some(ns) => ns,
-        None => return make_error_result(
-            MoqResultCode::MoqErrorInvalidArgument,
-            "Invalid namespace format",
-        ),
-    };
+    // Parse namespace from string (using slash-separated path)
+    let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
 
     if inner.announced_namespaces.contains_key(&track_namespace) {
         set_last_error(format!("Namespace already announced: {}", namespace_str));
@@ -522,17 +506,18 @@ pub unsafe extern "C" fn moq_announce_namespace(
         }
     };
 
-    // Create tracks writer for this namespace
-    let (tracks_writer, tracks_reader) = serve::Tracks::new(track_namespace.clone());
+    // Create tracks for this namespace
+    let (tracks_writer, _tracks_request, tracks_reader) = serve::Tracks::new(track_namespace.clone()).produce();
 
     // Spawn task to announce and handle subscriptions
+    let track_namespace_clone = track_namespace.clone();
     let client_inner = client_ref.inner.clone();
     RUNTIME.spawn(async move {
         if let Err(e) = publisher.announce(tracks_reader).await {
             log::error!("Failed to announce namespace: {}", e);
             // Remove from announced namespaces on failure
             if let Ok(mut inner) = client_inner.lock() {
-                inner.announced_namespaces.remove(&track_namespace);
+                inner.announced_namespaces.remove(&track_namespace_clone);
             }
         }
     });
@@ -586,13 +571,7 @@ pub unsafe extern "C" fn moq_create_publisher(
     }
 
     // Parse namespace
-    let track_namespace = match TrackNamespace::try_from(namespace_str.as_str()) {
-        Ok(ns) => ns,
-        Err(e) => {
-            set_last_error(format!("Invalid namespace format: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
+    let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
 
     // Get the tracks writer for this namespace
     let mut tracks_writer = match inner.announced_namespaces.get(&track_namespace) {
@@ -606,12 +585,10 @@ pub unsafe extern "C" fn moq_create_publisher(
     drop(inner);
 
     // Create a track within this namespace
-    let track = match RUNTIME.block_on(async {
-        tracks_writer.create(&track_name_str).await
-    }) {
-        Ok(track) => track,
-        Err(e) => {
-            set_last_error(format!("Failed to create track: {}", e));
+    let track = match tracks_writer.create(&track_name_str) {
+        Some(track) => track,
+        None => {
+            set_last_error("Failed to create track (all readers dropped)".to_string());
             return std::ptr::null_mut();
         }
     };
@@ -670,40 +647,67 @@ pub unsafe extern "C" fn moq_publish_data(
     let data_vec = data_slice.to_vec();
 
     // Get track clone for async operation
-    let mut track = inner.track.clone();
+    let track = inner.track.clone();
     let namespace = inner.namespace.clone();
     let track_name = inner.track_name.clone();
     
     drop(inner);
 
     // Publish data based on delivery mode
-    let result = RUNTIME.block_on(async move {
-        match delivery_mode {
-            MoqDeliveryMode::MoqDeliveryDatagram => {
-                // For datagram delivery, we need to write the data as a datagram
-                // MoQ datagrams are for unreliable, unordered delivery
-                let mut object = track.create_datagram().await
+    let result = match delivery_mode {
+        MoqDeliveryMode::MoqDeliveryDatagram => {
+            // For datagram delivery, use DatagramsWriter
+            let mut datagrams = match track.datagrams() {
+                Ok(d) => d,
+                Err(e) => {
+                    let msg = format!("Failed to get datagrams writer: {}", e);
+                    set_last_error(msg.clone());
+                    return make_error_result(MoqResultCode::MoqErrorInternal, &msg);
+                }
+            };
+
+            RUNTIME.block_on(async move {
+                let mut datagram = datagrams.write().await
                     .map_err(|e| format!("Failed to create datagram: {}", e))?;
                 
-                object.write(&data_vec).await
+                datagram.write(&data_vec).await
                     .map_err(|e| format!("Failed to write datagram: {}", e))?;
                 
                 log::debug!("Published {} bytes to {:?}/{} via datagram", data_vec.len(), namespace, track_name);
-                Ok(())
-            }
-            MoqDeliveryMode::MoqDeliveryStream => {
-                // For stream delivery, we write to a subgroup (reliable, ordered)
-                let mut object = track.create_subgroup().await
-                    .map_err(|e| format!("Failed to create subgroup: {}", e))?;
+                Ok::<(), String>(())
+            })
+        }
+        MoqDeliveryMode::MoqDeliveryStream => {
+            // For stream delivery, use StreamWriter with groups/subgroups
+            let stream = match track.stream(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("Failed to get stream writer: {}", e);
+                    set_last_error(msg.clone());
+                    return make_error_result(MoqResultCode::MoqErrorInternal, &msg);
+                }
+            };
+
+            RUNTIME.block_on(async move {
+                // Use a simple group/object pattern for now
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static GROUP_ID: AtomicU64 = AtomicU64::new(0);
+                
+                let group_id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
+                let mut group = stream.create(group_id)
+                    .map_err(|e| format!("Failed to create group: {}", e))?;
+                
+                let mut object = group.write(0).await
+                    .map_err(|e| format!("Failed to create object: {}", e))?;
                 
                 object.write(&data_vec).await
-                    .map_err(|e| format!("Failed to write subgroup: {}", e))?;
+                    .map_err(|e| format!("Failed to write object: {}", e))?;
                 
                 log::debug!("Published {} bytes to {:?}/{} via stream", data_vec.len(), namespace, track_name);
-                Ok(())
-            }
+                Ok::<(), String>(())
+            })
         }
-    });
+    };
 
     match result {
         Ok(()) => make_ok_result(),
@@ -762,13 +766,7 @@ pub unsafe extern "C" fn moq_subscribe(
     }
 
     // Parse namespace
-    let track_namespace = match TrackNamespace::try_from(namespace_str.as_str()) {
-        Ok(ns) => ns,
-        Err(e) => {
-            set_last_error(format!("Invalid namespace format: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
+    let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
 
     // Get subscriber
     let mut subscriber_impl = match inner.subscriber.as_mut() {
@@ -782,7 +780,7 @@ pub unsafe extern "C" fn moq_subscribe(
     drop(inner);
 
     // Create track writer/reader pair for subscription
-    let (track_writer, track_reader) = serve::Track::new(track_namespace.clone(), track_name_str.clone());
+    let (track_writer, track_reader) = serve::Track::new(track_namespace.clone(), track_name_str.clone()).produce();
 
     // Subscribe to the track
     let subscribe_result = RUNTIME.block_on(async move {
@@ -814,35 +812,93 @@ pub unsafe extern "C" fn moq_subscribe(
             inner.track.clone()
         };
 
-        loop {
-            // Read next object from track
-            match track.read_object().await {
-                Ok(Some(mut object)) => {
-                    // Read all data from object
-                    let mut buffer = Vec::new();
-                    match object.read_to_end(&mut buffer).await {
-                        Ok(_) => {
-                            // Invoke callback with data
-                            let inner = inner_clone.lock().unwrap();
-                            if let Some(callback) = inner.data_callback {
-                                callback(inner.user_data, buffer.as_ptr(), buffer.len());
+        // Get the mode once (it's set when track is established)
+        let mode_result = track.mode().await;
+        match mode_result {
+            Ok(mode) => {
+                use moq_transport::serve::TrackReaderMode;
+                
+                loop {
+                    let data_result = match &mode {
+                        TrackReaderMode::Stream(stream) => {
+                            // Read from stream - groups contain objects
+                            let mut stream = stream.clone();
+                            match stream.read().await {
+                                Ok(Some(mut group)) => {
+                                    match group.read().await {
+                                        Ok(Some(mut object)) => {
+                                            let mut buffer = Vec::new();
+                                            object.read_to_end(&mut buffer).await.ok();
+                                            Some(buffer)
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                Ok(None) => {
+                                    log::info!("Stream ended: {:?}/{}", track_namespace, track_name_str);
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::error!("Stream read error: {}", e);
+                                    None
+                                }
                             }
                         }
-                        Err(e) => {
-                            log::error!("Failed to read object data: {}", e);
-                            break;
+                        TrackReaderMode::Subgroups(subgroups) => {
+                            // Read from subgroups
+                            let mut subgroups = subgroups.clone();
+                            match subgroups.read().await {
+                                Ok(Some(mut subgroup)) => {
+                                    match subgroup.read().await {
+                                        Ok(Some(mut object)) => {
+                                            let mut buffer = Vec::new();
+                                            object.read_to_end(&mut buffer).await.ok();
+                                            Some(buffer)
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                Ok(None) => {
+                                    log::info!("Subgroups ended: {:?}/{}", track_namespace, track_name_str);
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::error!("Subgroups read error: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                        TrackReaderMode::Datagrams(datagrams) => {
+                            // Read datagram
+                            let mut datagrams = datagrams.clone();
+                            match datagrams.read().await {
+                                Ok(Some(datagram)) => {
+                                    // Datagram is just bytes
+                                    Some(datagram.payload.to_vec())
+                                }
+                                Ok(None) => {
+                                    log::info!("Datagrams ended: {:?}/{}", track_namespace, track_name_str);
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::error!("Datagram read error: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                    };
+
+                    // Invoke callback if we got data
+                    if let Some(buffer) = data_result {
+                        let inner = inner_clone.lock().unwrap();
+                        if let Some(callback) = inner.data_callback {
+                            callback(inner.user_data, buffer.as_ptr(), buffer.len());
                         }
                     }
                 }
-                Ok(None) => {
-                    // Track closed
-                    log::info!("Track closed: {:?}/{}", track_namespace, track_name_str);
-                    break;
-                }
-                Err(e) => {
-                    log::error!("Failed to read object: {}", e);
-                    break;
-                }
+            }
+            Err(e) => {
+                log::error!("Failed to get track mode: {}", e);
             }
         }
     });
