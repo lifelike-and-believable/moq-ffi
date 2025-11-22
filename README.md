@@ -297,6 +297,3 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - **Issues**: [GitHub Issues](https://github.com/lifelike-and-believable/moq-ffi/issues)
 - **MoQ Specification**: [IETF MoQ Transport Draft](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
 
----
-
-**Note**: This is an early-stage project. The full moq-transport backend integration is planned but not yet complete. The current implementation provides the infrastructure and stub backend for testing build toolchains and integration patterns.
