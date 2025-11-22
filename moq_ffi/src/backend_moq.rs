@@ -48,6 +48,12 @@ use moq::coding::Tuple as TrackNamespace;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
 const SUBSCRIBE_TIMEOUT_SECS: u64 = 30;
 
+// Endpoint bind addresses for QUIC client
+// IPv4 wildcard address for binding client endpoint
+const IPV4_BIND_ADDR: &str = "0.0.0.0:0";
+// IPv6 wildcard address for binding client endpoint
+const IPV6_BIND_ADDR: &str = "[::]:0";
+
 // Global tokio runtime for async operations
 // This runtime handles:
 // - Async WebTransport/QUIC operations
@@ -431,15 +437,19 @@ unsafe fn moq_connect_impl(
             //
             // IPv4/IPv6 Selection Strategy:
             // - Windows: Prefer IPv4 due to common IPv6 connectivity issues
-            //   (IPv6 may be enabled but not properly configured or routable)
-            // - Linux/macOS: Try IPv6 first, fall back to IPv4 if unavailable
+            //   Specifically, IPv6 may be enabled at the OS level but lack proper
+            //   network configuration, routing, or ISP support, causing connections
+            //   to hang or timeout when attempting to use IPv6.
+            // - Linux/macOS: Try IPv6 first (better connectivity in many networks),
+            //   fall back to IPv4 if IPv6 endpoint creation fails.
             //
             // This prevents connection hangs on Windows when IPv6 is enabled
-            // but not functioning properly.
+            // but not functioning properly, while maintaining optimal connectivity
+            // on Unix-like systems where IPv6 is more commonly well-configured.
             #[cfg(target_os = "windows")]
             let mut endpoint = {
                 log::debug!("Windows platform detected, using IPv4 endpoint");
-                let ipv4_addr = "0.0.0.0:0"
+                let ipv4_addr = IPV4_BIND_ADDR
                     .parse()
                     .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
                 quinn::Endpoint::client(ipv4_addr)
@@ -447,7 +457,7 @@ unsafe fn moq_connect_impl(
             };
 
             #[cfg(not(target_os = "windows"))]
-            let mut endpoint = match "[::]:0".parse::<std::net::SocketAddr>() {
+            let mut endpoint = match IPV6_BIND_ADDR.parse::<std::net::SocketAddr>() {
                 Ok(ipv6_addr) => {
                     // Try to create IPv6 endpoint
                     match quinn::Endpoint::client(ipv6_addr) {
@@ -461,7 +471,7 @@ unsafe fn moq_connect_impl(
                                 "IPv6 endpoint creation failed ({}), falling back to IPv4",
                                 e
                             );
-                            let ipv4_addr = "0.0.0.0:0"
+                            let ipv4_addr = IPV4_BIND_ADDR
                                 .parse()
                                 .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
                             quinn::Endpoint::client(ipv4_addr)
@@ -469,10 +479,10 @@ unsafe fn moq_connect_impl(
                         }
                     }
                 }
-                // Note: This branch is defensive programming - "[::]:0" should always parse successfully
+                // Note: This branch is defensive programming - IPV6_BIND_ADDR should always parse successfully
                 Err(_) => {
                     log::debug!("IPv6 address parsing failed (unexpected), using IPv4");
-                    let ipv4_addr = "0.0.0.0:0"
+                    let ipv4_addr = IPV4_BIND_ADDR
                         .parse()
                         .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
                     quinn::Endpoint::client(ipv4_addr)
