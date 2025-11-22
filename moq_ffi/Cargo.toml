@@ -69,7 +69,13 @@ futures = { version = "0.3", optional = true }
 url = { version = "2.5", optional = true }
 bytes = { version = "1.11", optional = true }
 quinn = { version = "0.11", optional = true }
-rustls = { version = "0.23", optional = true }
+# Rustls 0.23+ requires explicit crypto provider selection.
+# We use aws-lc-rs (over ring) because it's:
+# - Faster and better maintained by AWS
+# - The default provider in rustls 0.23+
+# - FIPS-capable for regulated environments
+# - Better support for post-quantum cryptography
+rustls = { version = "0.23", features = ["aws-lc-rs"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 
 # Logging
