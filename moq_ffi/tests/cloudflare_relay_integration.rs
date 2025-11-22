@@ -227,7 +227,16 @@ fn test_connection_lifecycle() {
         moq_connect(client, url.as_ptr(), Some(connection_state_callback), tracker_ptr)
     };
     
-    println!("Connection attempt result: {:?}", result.code);
+    println!("Disconnect result: {:?}", disconnect_result.code);
+    // Free error message if present to prevent memory leak
+    unsafe {
+        if !disconnect_result.message.is_null() {
+            // Optionally print the error message
+            let msg = std::ffi::CStr::from_ptr(disconnect_result.message).to_string_lossy();
+            println!("Disconnect error message: {}", msg);
+            moq_free_str(disconnect_result.message);
+        }
+    }
     
     // Disconnect (whether or not connection succeeded)
     let disconnect_result = unsafe { moq_disconnect(client) };
