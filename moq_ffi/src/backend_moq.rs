@@ -17,7 +17,6 @@ use std::collections::HashMap;
 
 use tokio::runtime::Runtime;
 use once_cell::sync::Lazy;
-use tokio::io::AsyncReadExt;
 
 // MoQ transport types
 use moq_transport::coding::TrackNamespace;
@@ -57,10 +56,9 @@ fn get_last_error() -> Option<String> {
  * ─────────────────────────────────────────────── */
 
 use moq_transport::{
-    serve::{self, TracksReader, TracksWriter},
+    serve::{self, TracksWriter},
     session::{Publisher as MoqTransportPublisher, Session, Subscriber as MoqTransportSubscriber},
 };
-use tokio::sync::mpsc;
 
 struct ClientInner {
     connected: bool,
@@ -81,11 +79,16 @@ pub struct MoqClient {
     inner: Arc<Mutex<ClientInner>>,
 }
 
+enum PublisherMode {
+    Stream(serve::StreamWriter),
+    Datagrams(serve::DatagramsWriter),
+}
+
 struct PublisherInner {
     namespace: TrackNamespace,
     track_name: String,
-    tracks_writer: TracksWriter,
-    track: serve::TrackWriter,
+    mode: PublisherMode,
+    group_id_counter: std::sync::atomic::AtomicU64,
 }
 
 #[repr(C)]
@@ -97,7 +100,7 @@ struct SubscriberInner {
     namespace: TrackNamespace,
     track_name: String,
     data_callback: MoqDataCallback,
-    user_data: *mut std::ffi::c_void,
+    user_data: usize, // Store as usize for Send safety
     track: serve::TrackReader,
     // Handle to data reading task
     reader_task: Option<tokio::task::JoinHandle<()>>,
@@ -292,27 +295,49 @@ pub unsafe extern "C" fn moq_connect(
     };
 
     // Establish WebTransport connection asynchronously
+    // NOTE: This requires an actual MoQ relay server to be running at the URL.
+    // For testing without a relay, this will fail gracefully.
     let client_inner = client_ref.inner.clone();
+    let url_str_clone = url_str.clone();
     let result = RUNTIME.block_on(async move {
-        // Create WebTransport client
-        let client_config = web_transport::ClientConfig::builder()
-            .with_bind_default()
-            .with_native_certs()
-            .build();
+        // Create quinn endpoint for WebTransport
+        // Using default client configuration with native certificates
+        let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())
+            .map_err(|e| format!("Failed to create endpoint: {}", e))?;
 
-        let endpoint = web_transport::Endpoint::client(client_config)
-            .map_err(|e| format!("Failed to create WebTransport endpoint: {}", e))?;
+        // Configure TLS with native root certificates  
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().certs {
+            roots.add(cert).ok();
+        }
 
-        // Connect to server
-        let session = endpoint
-            .connect(&parsed_url)
+        let client_crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let mut client_config = quinn::ClientConfig::new(std::sync::Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
+                .map_err(|e| format!("Crypto config error: {}", e))?
+        ));
+        
+        // Set HTTP/3 ALPN
+        client_config.transport_config(std::sync::Arc::new(quinn::TransportConfig::default()));
+        endpoint.set_default_client_config(client_config);
+
+        // Connect via WebTransport using web_transport_quinn
+        // web-transport 0.3 re-exports from web_transport_quinn, but we call it directly
+        use web_transport_quinn::connect as wt_connect;
+        let wt_session_quinn = wt_connect(&endpoint, &parsed_url)
             .await
-            .map_err(|e| format!("Failed to connect to server: {}", e))?;
+            .map_err(|e| format!("Failed to connect via WebTransport: {}", e))?;
+        
+        // Convert to generic web_transport::Session
+        let wt_session = web_transport::Session::from(wt_session_quinn);
 
-        log::info!("WebTransport session established to {}", url_str);
+        log::info!("WebTransport session established to {}", url_str_clone);
 
         // Establish MoQ session over WebTransport
-        let (moq_session, publisher, subscriber) = Session::connect(session)
+        let (moq_session, publisher, subscriber) = Session::connect(wt_session)
             .await
             .map_err(|e| format!("Failed to establish MoQ session: {}", e))?;
 
@@ -320,7 +345,6 @@ pub unsafe extern "C" fn moq_connect(
 
         // Store session and publisher/subscriber
         let mut inner = client_inner.lock().unwrap();
-        inner.session = Some(moq_session);
         inner.publisher = Some(publisher);
         inner.subscriber = Some(subscriber);
         inner.connected = true;
@@ -331,9 +355,8 @@ pub unsafe extern "C" fn moq_connect(
         }
 
         // Spawn task to run the session
-        let session = inner.session.take().unwrap();
         let task = RUNTIME.spawn(async move {
-            if let Err(e) = session.run().await {
+            if let Err(e) = moq_session.run().await {
                 log::error!("MoQ session error: {}", e);
             }
         });
@@ -557,7 +580,7 @@ pub unsafe extern "C" fn moq_create_publisher(
     };
 
     let client_ref = &*client;
-    let inner = match client_ref.inner.lock() {
+    let mut inner = match client_ref.inner.lock() {
         Ok(inner) => inner,
         Err(_) => {
             set_last_error("Failed to lock client mutex".to_string());
@@ -574,32 +597,41 @@ pub unsafe extern "C" fn moq_create_publisher(
     let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
 
     // Get the tracks writer for this namespace
-    let mut tracks_writer = match inner.announced_namespaces.get(&track_namespace) {
-        Some(tw) => tw.clone(),
+    let tracks_writer = match inner.announced_namespaces.get_mut(&track_namespace) {
+        Some(tw) => tw,
         None => {
             set_last_error(format!("Namespace not announced: {}", namespace_str));
             return std::ptr::null_mut();
         }
     };
 
-    drop(inner);
-
-    // Create a track within this namespace
+    // Create track immediately
     let track = match tracks_writer.create(&track_name_str) {
-        Some(track) => track,
+        Some(t) => t,
         None => {
             set_last_error("Failed to create track (all readers dropped)".to_string());
             return std::ptr::null_mut();
         }
     };
 
+    // Default to stream mode (can support choosing mode later)
+    let mode = match track.stream(0) {
+        Ok(s) => PublisherMode::Stream(s),
+        Err(e) => {
+            set_last_error(format!("Failed to create stream writer: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    drop(inner);
+
     // Create publisher
     let publisher = MoqPublisher {
         inner: Arc::new(Mutex::new(PublisherInner {
             namespace: track_namespace,
             track_name: track_name_str.clone(),
-            tracks_writer,
-            track,
+            mode,
+            group_id_counter: std::sync::atomic::AtomicU64::new(0),
         })),
     };
 
@@ -620,7 +652,7 @@ pub unsafe extern "C" fn moq_publish_data(
     publisher: *mut MoqPublisher,
     data: *const u8,
     data_len: usize,
-    delivery_mode: MoqDeliveryMode,
+    _delivery_mode: MoqDeliveryMode,
 ) -> MoqResult {
     if publisher.is_null() || data.is_null() {
         set_last_error("Publisher or data is null".to_string());
@@ -631,7 +663,7 @@ pub unsafe extern "C" fn moq_publish_data(
     }
 
     let publisher_ref = &*publisher;
-    let inner = match publisher_ref.inner.lock() {
+    let mut inner = match publisher_ref.inner.lock() {
         Ok(inner) => inner,
         Err(_) => {
             set_last_error("Failed to lock publisher mutex".to_string());
@@ -642,70 +674,43 @@ pub unsafe extern "C" fn moq_publish_data(
         }
     };
 
-    // Copy data to owned buffer
+    // Copy data to Bytes
     let data_slice = std::slice::from_raw_parts(data, data_len);
-    let data_vec = data_slice.to_vec();
+    let data_bytes = bytes::Bytes::copy_from_slice(data_slice);
 
-    // Get track clone for async operation
-    let track = inner.track.clone();
     let namespace = inner.namespace.clone();
     let track_name = inner.track_name.clone();
     
-    drop(inner);
-
-    // Publish data based on delivery mode
-    let result = match delivery_mode {
-        MoqDeliveryMode::MoqDeliveryDatagram => {
-            // For datagram delivery, use DatagramsWriter
-            let mut datagrams = match track.datagrams() {
-                Ok(d) => d,
-                Err(e) => {
-                    let msg = format!("Failed to get datagrams writer: {}", e);
-                    set_last_error(msg.clone());
-                    return make_error_result(MoqResultCode::MoqErrorInternal, &msg);
-                }
+    // Get counter value before borrowing mode mutably
+    let counter_val = inner.group_id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    
+    // Publish data based on mode (using synchronous API)
+    // Note: delivery_mode parameter is ignored; mode is set at publisher creation
+    let result = match &mut inner.mode {
+        PublisherMode::Datagrams(datagrams) => {
+            // Create a datagram with metadata
+            let datagram = serve::Datagram {
+                group_id: 0,
+                object_id: counter_val,
+                priority: 0,
+                payload: data_bytes,
             };
-
-            RUNTIME.block_on(async move {
-                let mut datagram = datagrams.write().await
-                    .map_err(|e| format!("Failed to create datagram: {}", e))?;
-                
-                datagram.write(&data_vec).await
-                    .map_err(|e| format!("Failed to write datagram: {}", e))?;
-                
-                log::debug!("Published {} bytes to {:?}/{} via datagram", data_vec.len(), namespace, track_name);
-                Ok::<(), String>(())
-            })
+            
+            datagrams.write(datagram)
+                .map_err(|e| format!("Failed to write datagram: {}", e))
+                .map(|_| {
+                    log::debug!("Published {} bytes to {:?}/{} via datagram", data_len, namespace, track_name);
+                })
         }
-        MoqDeliveryMode::MoqDeliveryStream => {
-            // For stream delivery, use StreamWriter with groups/subgroups
-            let stream = match track.stream(0) {
-                Ok(s) => s,
-                Err(e) => {
-                    let msg = format!("Failed to get stream writer: {}", e);
-                    set_last_error(msg.clone());
-                    return make_error_result(MoqResultCode::MoqErrorInternal, &msg);
-                }
-            };
-
-            RUNTIME.block_on(async move {
-                // Use a simple group/object pattern for now
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static GROUP_ID: AtomicU64 = AtomicU64::new(0);
-                
-                let group_id = GROUP_ID.fetch_add(1, Ordering::Relaxed);
-                let mut group = stream.create(group_id)
-                    .map_err(|e| format!("Failed to create group: {}", e))?;
-                
-                let mut object = group.write(0).await
-                    .map_err(|e| format!("Failed to create object: {}", e))?;
-                
-                object.write(&data_vec).await
-                    .map_err(|e| format!("Failed to write object: {}", e))?;
-                
-                log::debug!("Published {} bytes to {:?}/{} via stream", data_vec.len(), namespace, track_name);
-                Ok::<(), String>(())
-            })
+        PublisherMode::Stream(stream) => {
+            stream.create(counter_val)
+                .and_then(|mut group| {
+                    group.write(data_bytes)
+                })
+                .map_err(|e| format!("Failed to write to stream: {}", e))
+                .map(|_| {
+                    log::debug!("Published {} bytes to {:?}/{} via stream", data_len, namespace, track_name);
+                })
         }
     };
 
@@ -752,7 +757,7 @@ pub unsafe extern "C" fn moq_subscribe(
     };
 
     let client_ref = &*client;
-    let inner = match client_ref.inner.lock() {
+    let mut inner = match client_ref.inner.lock() {
         Ok(inner) => inner,
         Err(_) => {
             set_last_error("Failed to lock client mutex".to_string());
@@ -799,15 +804,19 @@ pub unsafe extern "C" fn moq_subscribe(
         namespace: track_namespace.clone(),
         track_name: track_name_str.clone(),
         data_callback,
-        user_data,
+        user_data: user_data as usize,
         track: track_reader.clone(),
         reader_task: None,
     }));
 
+    // Clone values for the async task
+    let track_namespace_log = track_namespace.clone();
+    let track_name_log = track_name_str.clone();
+    
     // Spawn task to read data from track
     let inner_clone = subscriber_inner.clone();
     let reader_task = RUNTIME.spawn(async move {
-        let mut track = {
+        let track = {
             let inner = inner_clone.lock().unwrap();
             inner.track.clone()
         };
@@ -823,19 +832,30 @@ pub unsafe extern "C" fn moq_subscribe(
                         TrackReaderMode::Stream(stream) => {
                             // Read from stream - groups contain objects
                             let mut stream = stream.clone();
-                            match stream.read().await {
+                            match stream.next().await {
                                 Ok(Some(mut group)) => {
-                                    match group.read().await {
+                                    match group.next().await {
                                         Ok(Some(mut object)) => {
+                                            // Read all chunks from object
                                             let mut buffer = Vec::new();
-                                            object.read_to_end(&mut buffer).await.ok();
-                                            Some(buffer)
+                                            loop {
+                                                match object.read().await {
+                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
+                                                    Ok(None) => break,
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                            if !buffer.is_empty() {
+                                                Some(buffer)
+                                            } else {
+                                                None
+                                            }
                                         }
                                         _ => None,
                                     }
                                 }
                                 Ok(None) => {
-                                    log::info!("Stream ended: {:?}/{}", track_namespace, track_name_str);
+                                    log::info!("Stream ended: {:?}/{}", track_namespace_log, track_name_log);
                                     break;
                                 }
                                 Err(e) => {
@@ -847,19 +867,30 @@ pub unsafe extern "C" fn moq_subscribe(
                         TrackReaderMode::Subgroups(subgroups) => {
                             // Read from subgroups
                             let mut subgroups = subgroups.clone();
-                            match subgroups.read().await {
+                            match subgroups.next().await {
                                 Ok(Some(mut subgroup)) => {
-                                    match subgroup.read().await {
+                                    match subgroup.next().await {
                                         Ok(Some(mut object)) => {
+                                            // Read all chunks from object
                                             let mut buffer = Vec::new();
-                                            object.read_to_end(&mut buffer).await.ok();
-                                            Some(buffer)
+                                            loop {
+                                                match object.read().await {
+                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
+                                                    Ok(None) => break,
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                            if !buffer.is_empty() {
+                                                Some(buffer)
+                                            } else {
+                                                None
+                                            }
                                         }
                                         _ => None,
                                     }
                                 }
                                 Ok(None) => {
-                                    log::info!("Subgroups ended: {:?}/{}", track_namespace, track_name_str);
+                                    log::info!("Subgroups ended: {:?}/{}", track_namespace_log, track_name_log);
                                     break;
                                 }
                                 Err(e) => {
@@ -877,7 +908,7 @@ pub unsafe extern "C" fn moq_subscribe(
                                     Some(datagram.payload.to_vec())
                                 }
                                 Ok(None) => {
-                                    log::info!("Datagrams ended: {:?}/{}", track_namespace, track_name_str);
+                                    log::info!("Datagrams ended: {:?}/{}", track_namespace_log, track_name_log);
                                     break;
                                 }
                                 Err(e) => {
@@ -892,7 +923,7 @@ pub unsafe extern "C" fn moq_subscribe(
                     if let Some(buffer) = data_result {
                         let inner = inner_clone.lock().unwrap();
                         if let Some(callback) = inner.data_callback {
-                            callback(inner.user_data, buffer.as_ptr(), buffer.len());
+                            callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
                         }
                     }
                 }
