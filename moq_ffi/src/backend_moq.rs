@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
 use tokio::runtime::Runtime;
+use tokio::time::{timeout, Duration};
 use once_cell::sync::Lazy;
 
 // Compile-time check: Ensure only one MoQ version feature is enabled
@@ -41,6 +42,11 @@ use moq::coding::TrackNamespace;
 
 #[cfg(feature = "with_moq_draft07")]
 use moq::coding::Tuple as TrackNamespace;
+
+// Timeout configuration for async operations
+// These timeouts prevent operations from hanging indefinitely
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+const SUBSCRIBE_TIMEOUT_SECS: u64 = 30;
 
 // Global tokio runtime for async operations
 // This runtime handles:
@@ -424,7 +430,9 @@ unsafe fn moq_connect_impl(
     let client_inner = client_ref.inner.clone();
     let url_str_clone = url_str.clone();
     let result = RUNTIME.block_on(async move {
-        // Create quinn endpoint for WebTransport over QUIC
+        // Wrap the entire connection process in a timeout
+        match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), async {
+            // Create quinn endpoint for WebTransport over QUIC
         let bind_addr = "[::]:0".parse()
             .map_err(|e| format!("Failed to parse bind address: {}", e))?;
         let mut endpoint = quinn::Endpoint::client(bind_addr)
@@ -512,6 +520,10 @@ unsafe fn moq_connect_impl(
         inner.session_task = Some(task);
 
         Ok::<(), String>(())
+        }).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("Connection timeout after {} seconds", CONNECT_TIMEOUT_SECS)),
+        }
     });
 
     match result {
@@ -1209,10 +1221,15 @@ unsafe fn moq_subscribe_impl(
     // Create track writer/reader pair for subscription
     let (track_writer, track_reader) = serve::Track::new(track_namespace.clone(), track_name_str.clone()).produce();
 
-    // Subscribe to the track
+    // Subscribe to the track with timeout
     let subscribe_result = RUNTIME.block_on(async move {
-        subscriber_impl.subscribe(track_writer).await
-            .map_err(|e| format!("Failed to subscribe: {}", e))
+        match timeout(Duration::from_secs(SUBSCRIBE_TIMEOUT_SECS), async {
+            subscriber_impl.subscribe(track_writer).await
+                .map_err(|e| format!("Failed to subscribe: {}", e))
+        }).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("Subscribe timeout after {} seconds", SUBSCRIBE_TIMEOUT_SECS)),
+        }
     });
 
     if let Err(e) = subscribe_result {
@@ -2535,6 +2552,124 @@ mod tests {
                 )
             };
             assert!(subscriber.is_null());
+            
+            unsafe { moq_client_destroy(client); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Async Operation Timeout Tests
+     * ─────────────────────────────────────────────── */
+
+    mod timeout_tests {
+        use super::*;
+
+        #[test]
+        fn test_timeout_constants_are_reasonable() {
+            // Verify timeout constants are configured
+            assert!(CONNECT_TIMEOUT_SECS > 0, "Connect timeout must be positive");
+            assert!(SUBSCRIBE_TIMEOUT_SECS > 0, "Subscribe timeout must be positive");
+            assert!(CONNECT_TIMEOUT_SECS <= 300, "Connect timeout should be reasonable (<=5 min)");
+            assert!(SUBSCRIBE_TIMEOUT_SECS <= 300, "Subscribe timeout should be reasonable (<=5 min)");
+        }
+
+        #[test]
+        fn test_connect_fails_with_invalid_url_before_timeout() {
+            // This should fail quickly due to URL validation, not timeout
+            let client = moq_client_create();
+            let url = std::ffi::CString::new("invalid-url").unwrap();
+            
+            let start = std::time::Instant::now();
+            let result = unsafe {
+                moq_connect(
+                    client,
+                    url.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            let duration = start.elapsed();
+            
+            // Should fail immediately with invalid URL, not wait for timeout
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(duration.as_secs() < CONNECT_TIMEOUT_SECS, 
+                "Invalid URL should fail quickly, not wait for timeout");
+            
+            if !result.message.is_null() {
+                unsafe { moq_free_str(result.message); }
+            }
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        #[ignore = "Long-running test (30+ seconds) - run manually to verify timeout behavior"]
+        fn test_connect_timeout_with_unreachable_host() {
+            // Test with a host that will timeout (using a non-routable IP)
+            let client = moq_client_create();
+            // Use TEST-NET-1 (192.0.2.0/24) - reserved for documentation, guaranteed not routable
+            let url = std::ffi::CString::new("https://192.0.2.1:443").unwrap();
+            
+            let start = std::time::Instant::now();
+            let result = unsafe {
+                moq_connect(
+                    client,
+                    url.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            let duration = start.elapsed();
+            
+            // Should return an error (could be ConnectionFailed or Internal if panic caught)
+            assert!(result.code == MoqResultCode::MoqErrorConnectionFailed 
+                    || result.code == MoqResultCode::MoqErrorInternal,
+                "Expected connection to fail, got: {:?}", result.code);
+            
+            // Verify it timed out within a reasonable window (timeout + 5 seconds for overhead)
+            assert!(duration.as_secs() >= CONNECT_TIMEOUT_SECS - 1, 
+                "Should wait close to full timeout");
+            assert!(duration.as_secs() <= CONNECT_TIMEOUT_SECS + 5, 
+                "Should not take much longer than timeout");
+            
+            // Check that error message mentions timeout or connection issue
+            if !result.message.is_null() {
+                let msg = unsafe { 
+                    std::ffi::CStr::from_ptr(result.message).to_string_lossy().to_string() 
+                };
+                // Message should indicate either a timeout or connection problem
+                assert!(msg.to_lowercase().contains("timeout") 
+                        || msg.to_lowercase().contains("connect")
+                        || msg.to_lowercase().contains("panic"), 
+                    "Error message should mention timeout or connection issue: {}", msg);
+                unsafe { moq_free_str(result.message); }
+            }
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_fails_immediately_when_not_connected() {
+            // Subscribe should fail quickly when not connected, not wait for timeout
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            
+            let start = std::time::Instant::now();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            let duration = start.elapsed();
+            
+            // Should fail immediately because not connected
+            assert!(subscriber.is_null());
+            assert!(duration.as_secs() < 1, 
+                "Should fail immediately when not connected, not wait for timeout");
             
             unsafe { moq_client_destroy(client); }
         }
