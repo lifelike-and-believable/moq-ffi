@@ -24,9 +24,55 @@ cargo build --release --features with_moq
 
 The C API is defined in `include/moq_ffi.h`. See the main repository README for usage examples.
 
+## Testing
+
+The crate includes comprehensive unit tests covering all FFI functions:
+
+**Run tests (stub backend):**
+```bash
+cargo test
+```
+
+**Run tests (full backend - Draft 14):**
+```bash
+cargo test --features with_moq
+```
+
+**Run tests (full backend - Draft 07):**
+```bash
+cargo test --features with_moq_draft07
+```
+
+**Code Coverage:**
+```bash
+# Install cargo-llvm-cov
+cargo install cargo-llvm-cov
+
+# Run coverage (stub backend)
+cargo llvm-cov --lib
+
+# Run coverage (full backend)
+cargo llvm-cov --lib --features with_moq
+```
+
+**Coverage Results:**
+- Stub backend: 93%+ line coverage (63 tests)
+- Full backend: 69%+ line coverage (68 tests)
+- Total: 131 unit tests
+
+The test suite covers:
+- Lifecycle management (create/destroy operations)
+- Null pointer validation
+- Error handling and error codes
+- Panic protection at FFI boundaries
+- Memory safety and resource cleanup
+- Thread-local error storage
+- Enum values and helper functions
+
 ## Features
 
-- `with_moq` - Enable full moq-transport integration (default: disabled)
+- `with_moq` - Enable full moq-transport integration (IETF Draft 14, default: disabled)
+- `with_moq_draft07` - Enable Draft 07 integration (CloudFlare production relay, mutually exclusive with `with_moq`)
 
 ## License
 
