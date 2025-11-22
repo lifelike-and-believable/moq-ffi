@@ -1042,7 +1042,8 @@ unsafe fn moq_publish_data_impl(
     };
 
     // Copy data to Bytes (handle empty data case)
-    let data_bytes = if data_len == 0 || data.is_null() {
+    // Note: data_len == 0 case already validated above (null with non-zero length rejected)
+    let data_bytes = if data_len == 0 {
         bytes::Bytes::new()
     } else {
         let data_slice = std::slice::from_raw_parts(data, data_len);
