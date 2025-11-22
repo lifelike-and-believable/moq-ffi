@@ -255,7 +255,7 @@ cd moq_ffi
 # Test stub build (no dependencies)
 cargo test
 
-# Test full build with Draft 07 (CloudFlare production relay)
+# Test full build with Draft 07 (Cloudflare production relay)
 cargo test --features with_moq_draft07
 
 # Test full build with Draft 14 (Latest specification)
