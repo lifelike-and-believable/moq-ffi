@@ -428,9 +428,19 @@ fn test_multiple_clients() {
     let result2 = unsafe {
         moq_connect(client2, url.as_ptr(), Some(connection_state_callback), tracker_ptr2)
     };
-    
+
     println!("Client 1 connect result: {:?}", result1.code);
     println!("Client 2 connect result: {:?}", result2.code);
+
+    // Free error messages if present to avoid memory leaks
+    unsafe {
+        if !result1.message.is_null() {
+            moq_free_str(result1.message);
+        }
+        if !result2.message.is_null() {
+            moq_free_str(result2.message);
+        }
+    }
     
     // Cleanup
     unsafe {
