@@ -8,7 +8,8 @@ authors = ["Lifelike & Believable"]
 
 [lib]
 # Build both a static library and a Windows DLL (with import lib)
-crate-type = ["staticlib", "cdylib"]
+# Also include rlib for Rust integration tests
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 # ───────────────────────────────────────────────
 # Features
@@ -30,7 +31,7 @@ with_moq = [
     "dep:rustls-native-certs"
 ]
 
-# Use IETF Draft 7 compatible version (CloudFlare production relay)
+# Use IETF Draft 7 compatible version (Cloudflare production relay)
 # Note: Mutually exclusive with with_moq (which uses Draft 14)
 with_moq_draft07 = [
     "dep:moq-transport-draft07",
@@ -54,7 +55,7 @@ with_moq_draft07 = [
 # MoQ transport stack (IETF Draft 14 - latest from crates.io)
 moq-transport = { version = "0.11", optional = true }
 
-# MoQ transport stack (IETF Draft 7 - CloudFlare production)
+# MoQ transport stack (IETF Draft 7 - Cloudflare production)
 moq-transport-draft07 = { package = "moq-transport", git = "https://github.com/cloudflare/moq-rs.git", branch = "draft-ietf-moq-transport-07", optional = true }
 
 web-transport = { version = "0.3", optional = true }

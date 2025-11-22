@@ -1,0 +1,122 @@
+# Example GitHub Actions workflow for running integration tests
+# 
+# This is an EXAMPLE file - rename to integration-tests.yml to activate.
+# 
+# Integration tests are run separately from regular CI because they:
+# - Require network connectivity to external services
+# - Depend on Cloudflare relay availability
+# - Are slower than unit tests
+# - Should not block regular development workflow
+#
+# Usage:
+# 1. Rename this file to .github/workflows/integration-tests.yml
+# 2. Trigger manually via GitHub Actions UI or on specific branches
+
+name: Integration Tests
+
+# Trigger manually or on specific events
+on:
+  # Manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: 'Test filter (e.g., test_connect_to_cloudflare_relay)'
+        required: false
+        default: ''
+  
+  # Optionally run on release tags
+  # push:
+  #   tags:
+  #     - 'v*'
+  
+  # Optionally run on specific branches
+  # push:
+  #   branches:
+  #     - 'integration-test'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  integration-tests:
+    name: Integration Tests (Cloudflare Relay)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: moq_ffi/target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run Integration Tests
+        working-directory: moq_ffi
+        run: |
+          if [ -n "${{ github.event.inputs.test_filter }}" ]; then
+            echo "Running filtered test: ${{ github.event.inputs.test_filter }}"
+            cargo test --features with_moq_draft07 \
+              --test cloudflare_relay_integration \
+              ${{ github.event.inputs.test_filter }} \
+              -- --ignored --nocapture
+          else
+            echo "Running all integration tests"
+            cargo test --features with_moq_draft07 \
+              --test cloudflare_relay_integration \
+              -- --ignored --nocapture
+          fi
+        continue-on-error: true
+        timeout-minutes: 10
+      
+      - name: Check test results
+        if: always()
+        run: |
+          echo "Integration tests completed (failures may be due to network issues)"
+          echo "See logs above for detailed results"
+      
+      # Optional: Upload test results as artifacts
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: |
+            moq_ffi/target/debug/deps/cloudflare_relay_integration-*.log
+          if-no-files-found: ignore
+
+# Alternative: Run integration tests on a schedule (e.g., daily)
+# 
+# on:
+#   schedule:
+#     # Run at 2 AM UTC every day
+#     - cron: '0 2 * * *'
+#   workflow_dispatch:
+#
+# This allows monitoring of relay availability and protocol changes
+
+# Notes:
+# - continue-on-error: true prevents network failures from failing the workflow
+# - timeout-minutes: 10 prevents hanging on network issues
+# - Test results can still be reviewed in the logs even with continue-on-error
