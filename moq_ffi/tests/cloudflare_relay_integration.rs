@@ -55,7 +55,9 @@ unsafe extern "C" fn connection_state_callback(
         return;
     }
     
-    // user_data is a pointer to Arc<Mutex<...>> that lives for the test duration
+    // SAFETY: user_data is a pointer to Arc<Mutex<...>> created by the test function.
+    // The Arc is guaranteed to remain valid for the entire test duration.
+    // This cast is safe because we control both the creation and usage of this pointer.
     let tracker = &*(user_data as *const Arc<Mutex<ConnectionStateTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.current_state = state;
@@ -95,7 +97,9 @@ unsafe extern "C" fn data_received_callback(
         return;
     }
     
-    // user_data is a pointer to Arc<Mutex<...>> that lives for the test duration
+    // SAFETY: user_data is a pointer to Arc<Mutex<...>> created by the test function.
+    // The Arc is guaranteed to remain valid for the entire test duration.
+    // This cast is safe because we control both the creation and usage of this pointer.
     let tracker = &*(user_data as *const Arc<Mutex<DataTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.data_received = true;
