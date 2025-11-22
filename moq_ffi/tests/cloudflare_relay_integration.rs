@@ -72,7 +72,7 @@ unsafe extern "C" fn connection_state_callback(
     if user_data.is_null() {
         return;
     }
-    
+
     // SAFETY: user_data is a pointer to Arc<Mutex<...>> created by the test function.
     // The Arc is guaranteed to remain valid for the entire test duration.
     // This cast is safe because we control both the creation and usage of this pointer.
@@ -114,7 +114,7 @@ unsafe extern "C" fn data_received_callback(
     if user_data.is_null() {
         return;
     }
-    
+
     // SAFETY: user_data is a pointer to Arc<Mutex<...>> created by the test function.
     // The Arc is guaranteed to remain valid for the entire test duration.
     // This cast is safe because we control both the creation and usage of this pointer.
@@ -123,7 +123,10 @@ unsafe extern "C" fn data_received_callback(
         t.data_received = true;
         t.received_count += 1;
         t.last_data_size = data_len;
-        println!("[Callback] Received data: {} bytes (total count: {})", data_len, t.received_count);
+        println!(
+            "[Callback] Received data: {} bytes (total count: {})",
+            data_len, t.received_count
+        );
     }
 }
 
@@ -134,14 +137,14 @@ where
 {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
-    
+
     while start.elapsed() < timeout {
         if condition() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    
+
     false
 }
 
@@ -149,19 +152,19 @@ where
 #[ignore] // Requires network connectivity
 fn test_connect_to_cloudflare_relay() {
     println!("\n=== Test: Connect to Cloudflare Relay ===");
-    
+
     // Initialize CryptoProvider before any TLS operations
     init_crypto_provider();
-    
+
     // Create client
     let client = moq_client_create();
     assert!(!client.is_null(), "Failed to create client");
-    
+
     // Setup connection state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
     // Pass a pointer to the Arc (not Arc::into_raw) since we keep the Arc alive for the test duration
     let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
-    
+
     // Connect to Cloudflare relay
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
     let result = unsafe {
@@ -172,7 +175,7 @@ fn test_connect_to_cloudflare_relay() {
             tracker_ptr,
         )
     };
-    
+
     // Check connection initiation
     println!("Connect result: code={:?}", result.code);
     if result.code != MoqResultCode::MoqOk && !result.message.is_null() {
@@ -180,46 +183,47 @@ fn test_connect_to_cloudflare_relay() {
         println!("Error message: {}", msg.to_string_lossy());
         unsafe { moq_free_str(result.message) };
     }
-    
+
     // Note: Connection may take time, so we check for either success or in-progress
     assert!(
-        result.code == MoqResultCode::MoqOk || 
-        result.code == MoqResultCode::MoqErrorTimeout,
+        result.code == MoqResultCode::MoqOk || result.code == MoqResultCode::MoqErrorTimeout,
         "Connection should either succeed or timeout"
     );
-    
+
     // Wait for state change (if connection was initiated)
     if result.code == MoqResultCode::MoqOk {
         let connected = wait_for_condition(
             || {
                 if let Ok(tracker) = state_tracker.lock() {
-                    tracker.state_changed && 
-                    (tracker.current_state == MoqConnectionState::MoqStateConnected ||
-                     tracker.current_state == MoqConnectionState::MoqStateFailed)
+                    tracker.state_changed
+                        && (tracker.current_state == MoqConnectionState::MoqStateConnected
+                            || tracker.current_state == MoqConnectionState::MoqStateFailed)
                 } else {
                     false
                 }
             },
             TEST_TIMEOUT_SECS,
         );
-        
+
         if let Ok(tracker) = state_tracker.lock() {
             println!("Final connection state: {:?}", tracker.current_state);
         }
-        
+
         // For this test, we just verify the connection was attempted
         // Actual success depends on network conditions and relay availability
-        assert!(connected || result.code == MoqResultCode::MoqErrorTimeout, 
-                "Connection should complete (success or failure) within timeout");
+        assert!(
+            connected || result.code == MoqResultCode::MoqErrorTimeout,
+            "Connection should complete (success or failure) within timeout"
+        );
     }
-    
+
     // Cleanup
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
         // state_tracker will be automatically dropped when it goes out of scope
     }
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -227,45 +231,50 @@ fn test_connect_to_cloudflare_relay() {
 #[ignore] // Requires network connectivity
 fn test_connection_lifecycle() {
     println!("\n=== Test: Connection Lifecycle ===");
-    
+
     // Initialize CryptoProvider before any TLS operations
     init_crypto_provider();
-    
+
     let client = moq_client_create();
     assert!(!client.is_null());
-    
+
     // Initially should be disconnected
     let connected = unsafe { moq_is_connected(client) };
     assert!(!connected, "Client should start disconnected");
     println!("Initial state: disconnected ✓");
-    
+
     // Setup state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
     let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
-    
+
     // Attempt connection
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
     let result = unsafe {
-        moq_connect(client, url.as_ptr(), Some(connection_state_callback), tracker_ptr)
+        moq_connect(
+            client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            tracker_ptr,
+        )
     };
-    
+
     println!("Connection attempt result: {:?}", result.code);
-    
+
     // Disconnect (whether or not connection succeeded)
     let disconnect_result = unsafe { moq_disconnect(client) };
     println!("Disconnect result: {:?}", disconnect_result.code);
-    
+
     // Should be disconnected again
     let connected = unsafe { moq_is_connected(client) };
     assert!(!connected, "Client should be disconnected after disconnect");
     println!("Final state: disconnected ✓");
-    
+
     // Cleanup
     unsafe {
         moq_client_destroy(client);
         // state_tracker will be automatically dropped when it goes out of scope
     }
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -273,14 +282,14 @@ fn test_connection_lifecycle() {
 #[ignore] // Requires network connectivity
 fn test_announce_namespace_requires_connection() {
     println!("\n=== Test: Announce Namespace (Requires Connection) ===");
-    
+
     let client = moq_client_create();
     assert!(!client.is_null());
-    
+
     // Try to announce without connecting first
     let namespace = CString::new("test-namespace").unwrap();
     let result = unsafe { moq_announce_namespace(client, namespace.as_ptr()) };
-    
+
     // Should fail because not connected
     println!("Announce without connection: {:?}", result.code);
     assert_eq!(
@@ -288,16 +297,16 @@ fn test_announce_namespace_requires_connection() {
         MoqResultCode::MoqErrorNotConnected,
         "Should fail when not connected"
     );
-    
+
     if !result.message.is_null() {
         let msg = unsafe { std::ffi::CStr::from_ptr(result.message) };
         println!("Error message: {}", msg.to_string_lossy());
         unsafe { moq_free_str(result.message) };
     }
-    
+
     // Cleanup
     unsafe { moq_client_destroy(client) };
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -305,25 +314,30 @@ fn test_announce_namespace_requires_connection() {
 #[ignore] // Requires network connectivity and successful connection
 fn test_full_publish_workflow() {
     println!("\n=== Test: Full Publish Workflow ===");
-    
+
     // Initialize CryptoProvider before any TLS operations
     init_crypto_provider();
-    
+
     let client = moq_client_create();
     assert!(!client.is_null());
-    
+
     // Setup state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
     let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
-    
+
     // Connect
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
     let result = unsafe {
-        moq_connect(client, url.as_ptr(), Some(connection_state_callback), tracker_ptr)
+        moq_connect(
+            client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            tracker_ptr,
+        )
     };
-    
+
     println!("Connection result: {:?}", result.code);
-    
+
     if result.code == MoqResultCode::MoqOk {
         // Wait for connection to be established
         let connected = wait_for_condition(
@@ -336,27 +350,27 @@ fn test_full_publish_workflow() {
             },
             TEST_TIMEOUT_SECS,
         );
-        
+
         if connected {
             println!("Connected successfully ✓");
-            
+
             // Announce namespace
             let namespace = CString::new("moq-ffi-test").unwrap();
             let announce_result = unsafe { moq_announce_namespace(client, namespace.as_ptr()) };
             println!("Announce namespace result: {:?}", announce_result.code);
-            
+
             if announce_result.code == MoqResultCode::MoqOk {
                 println!("Namespace announced ✓");
-                
+
                 // Create publisher
                 let track_name = CString::new("test-track").unwrap();
                 let publisher = unsafe {
                     moq_create_publisher(client, namespace.as_ptr(), track_name.as_ptr())
                 };
-                
+
                 if !publisher.is_null() {
                     println!("Publisher created ✓");
-                    
+
                     // Publish some test data
                     let test_data = b"Hello from moq-ffi integration test!";
                     let publish_result = unsafe {
@@ -367,9 +381,9 @@ fn test_full_publish_workflow() {
                             MoqDeliveryMode::MoqDeliveryStream,
                         )
                     };
-                    
+
                     println!("Publish data result: {:?}", publish_result.code);
-                    
+
                     if publish_result.code == MoqResultCode::MoqOk {
                         println!("Data published successfully ✓");
                     } else if !publish_result.message.is_null() {
@@ -377,7 +391,7 @@ fn test_full_publish_workflow() {
                         println!("Publish error: {}", msg.to_string_lossy());
                         unsafe { moq_free_str(publish_result.message) };
                     }
-                    
+
                     // Cleanup publisher
                     unsafe { moq_publisher_destroy(publisher) };
                 } else {
@@ -396,14 +410,14 @@ fn test_full_publish_workflow() {
         println!("Connection error: {}", msg.to_string_lossy());
         unsafe { moq_free_str(result.message) };
     }
-    
+
     // Cleanup
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
         // state_tracker will be automatically dropped when it goes out of scope
     }
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -411,46 +425,56 @@ fn test_full_publish_workflow() {
 #[ignore] // Requires network connectivity
 fn test_multiple_clients() {
     println!("\n=== Test: Multiple Clients ===");
-    
+
     // Initialize CryptoProvider before any TLS operations
     init_crypto_provider();
-    
+
     // Create two clients
     let client1 = moq_client_create();
     let client2 = moq_client_create();
-    
+
     assert!(!client1.is_null());
     assert!(!client2.is_null());
     assert_ne!(client1, client2, "Clients should be different");
-    
+
     println!("Created two separate clients ✓");
-    
+
     // Both should start disconnected
     assert!(!unsafe { moq_is_connected(client1) });
     assert!(!unsafe { moq_is_connected(client2) });
     println!("Both clients start disconnected ✓");
-    
+
     // Setup tracking for both
     let state_tracker1 = Arc::new(Mutex::new(ConnectionStateTracker::new()));
     let tracker_ptr1 = &state_tracker1 as *const _ as *mut std::ffi::c_void;
-    
+
     let state_tracker2 = Arc::new(Mutex::new(ConnectionStateTracker::new()));
     let tracker_ptr2 = &state_tracker2 as *const _ as *mut std::ffi::c_void;
-    
+
     // Attempt to connect both
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
-    
+
     let result1 = unsafe {
-        moq_connect(client1, url.as_ptr(), Some(connection_state_callback), tracker_ptr1)
+        moq_connect(
+            client1,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            tracker_ptr1,
+        )
     };
-    
+
     let result2 = unsafe {
-        moq_connect(client2, url.as_ptr(), Some(connection_state_callback), tracker_ptr2)
+        moq_connect(
+            client2,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            tracker_ptr2,
+        )
     };
-    
+
     println!("Client 1 connect result: {:?}", result1.code);
     println!("Client 2 connect result: {:?}", result2.code);
-    
+
     // Cleanup
     unsafe {
         moq_disconnect(client1);
@@ -459,7 +483,7 @@ fn test_multiple_clients() {
         moq_client_destroy(client2);
         // state_tracker1 and state_tracker2 will be automatically dropped when they go out of scope
     }
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -467,34 +491,32 @@ fn test_multiple_clients() {
 #[ignore] // Requires network connectivity
 fn test_error_handling_invalid_url() {
     println!("\n=== Test: Error Handling - Invalid URL ===");
-    
+
     let client = moq_client_create();
     assert!(!client.is_null());
-    
+
     // Try to connect with invalid URL
     let invalid_url = CString::new("not-a-valid-url").unwrap();
-    let result = unsafe {
-        moq_connect(client, invalid_url.as_ptr(), None, ptr::null_mut())
-    };
-    
+    let result = unsafe { moq_connect(client, invalid_url.as_ptr(), None, ptr::null_mut()) };
+
     println!("Connect with invalid URL result: {:?}", result.code);
-    
+
     // Should fail with appropriate error
     assert_ne!(
         result.code,
         MoqResultCode::MoqOk,
         "Should fail with invalid URL"
     );
-    
+
     if !result.message.is_null() {
         let msg = unsafe { std::ffi::CStr::from_ptr(result.message) };
         println!("Error message: {}", msg.to_string_lossy());
         unsafe { moq_free_str(result.message) };
     }
-    
+
     // Cleanup
     unsafe { moq_client_destroy(client) };
-    
+
     println!("=== Test Complete ===\n");
 }
 
@@ -502,18 +524,21 @@ fn test_error_handling_invalid_url() {
 #[ignore] // Requires network connectivity
 fn test_version_and_utilities() {
     println!("\n=== Test: Version and Utility Functions ===");
-    
+
     // Test version function
     let version = moq_version();
     assert!(!version.is_null());
-    
+
     let version_str = unsafe { std::ffi::CStr::from_ptr(version) };
     println!("moq_ffi version: {}", version_str.to_string_lossy());
-    assert!(!version_str.to_bytes().is_empty(), "Version should not be empty");
-    
+    assert!(
+        !version_str.to_bytes().is_empty(),
+        "Version should not be empty"
+    );
+
     // Test last_error (should be null initially)
     let last_error = moq_last_error();
     println!("Initial last_error: {:?}", last_error);
-    
+
     println!("=== Test Complete ===\n");
 }
