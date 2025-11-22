@@ -3,12 +3,18 @@
 // This backend provides implementations of all FFI functions using the moq-transport library.
 // The implementation uses moq-transport types and follows MoQ protocol patterns.
 //
-// Current state:
-// - FFI layer is production-ready with proper error handling and memory safety
-// - Infrastructure for async operations (Tokio runtime, thread-safe state) is complete
-// - MoQ transport types are integrated for track namespaces and data structures
-// - Connection simulation allows testing and integration without relay server
-// - Ready for WebTransport/QUIC integration when relay endpoint is available
+// Features:
+// - Support for both IETF Draft 7 (CloudFlare production - PRIORITY) and Draft 14 (latest)
+// - WebTransport over QUIC connection support (both drafts)
+// - Stream and Datagram delivery modes
+// - Full async runtime integration with proper FFI safety
+//
+// TODO(Draft 14): Future enhancements for Draft 14 implementation
+// - Add raw QUIC connection support (without WebTransport protocol layer)
+// - Implement direct Session creation from quinn::Connection
+// - Add connection pooling and reuse capabilities
+// - Optimize for lower latency scenarios
+// - Add comprehensive integration tests with Draft 14 relay servers
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -18,8 +24,23 @@ use std::collections::HashMap;
 use tokio::runtime::Runtime;
 use once_cell::sync::Lazy;
 
-// MoQ transport types
-use moq_transport::coding::TrackNamespace;
+// Compile-time check: Ensure only one MoQ version feature is enabled
+#[cfg(all(feature = "with_moq", feature = "with_moq_draft07"))]
+compile_error!("Cannot enable both 'with_moq' and 'with_moq_draft07' features simultaneously. Choose one based on your relay server.");
+
+// Import the appropriate moq-transport version based on feature flags
+#[cfg(feature = "with_moq")]
+use moq_transport as moq;
+
+#[cfg(feature = "with_moq_draft07")]
+use moq_transport_draft07 as moq;
+
+// MoQ transport types - handle API differences between drafts
+#[cfg(feature = "with_moq")]
+use moq::coding::TrackNamespace;
+
+#[cfg(feature = "with_moq_draft07")]
+use moq::coding::Tuple as TrackNamespace;
 
 // Global tokio runtime for async operations
 // This runtime handles:
@@ -55,7 +76,7 @@ fn get_last_error() -> Option<String> {
  * Opaque Types
  * ─────────────────────────────────────────────── */
 
-use moq_transport::{
+use moq::{
     serve::{self, TracksWriter},
     session::{Publisher as MoqTransportPublisher, Session, Subscriber as MoqTransportSubscriber},
 };
@@ -260,12 +281,21 @@ pub unsafe extern "C" fn moq_connect(
         }
     };
 
-    // Validate URL format
+    // Validate URL format - must be HTTPS for WebTransport over QUIC
+    // Draft 07 (CloudFlare): WebTransport over QUIC only (current priority)
+    // Draft 14 (Latest): WebTransport over QUIC
+    // 
+    // TODO(Draft 14): Add support for raw QUIC connections (quic:// URLs)
+    // - Accept both https:// (WebTransport) and quic:// (raw QUIC) for Draft 14
+    // - Implement direct QUIC connection without HTTP/3 handshake
+    // - Use moq-transport Session::connect() with raw QUIC streams
+    // - Add ALPN negotiation for MoQ protocol identification
+    // - Reference: https://github.com/moq-wg/moq-transport
     if !url_str.starts_with("https://") {
         set_last_error(format!("Invalid URL scheme: {}", url_str));
         return make_error_result(
             MoqResultCode::MoqErrorInvalidArgument,
-            "URL must start with https:// (WebTransport requires HTTPS)",
+            "URL must start with https:// (WebTransport over QUIC)",
         );
     }
 
@@ -279,7 +309,7 @@ pub unsafe extern "C" fn moq_connect(
         callback(user_data, MoqConnectionState::MoqStateConnecting);
     }
 
-    // Parse URL for WebTransport
+    // Parse URL
     let parsed_url = match url::Url::parse(&url_str) {
         Ok(u) => u,
         Err(e) => {
@@ -294,14 +324,21 @@ pub unsafe extern "C" fn moq_connect(
         }
     };
 
-    // Establish WebTransport connection asynchronously
-    // NOTE: This requires an actual MoQ relay server to be running at the URL.
-    // For testing without a relay, this will fail gracefully.
+    // Establish WebTransport connection over QUIC asynchronously
+    // Priority: Draft 07 (CloudFlare production relay)
+    // Both Draft 07 and Draft 14 use WebTransport over QUIC
+    //
+    // TODO(Draft 14): Implement connection type detection and routing
+    // When Draft 14 raw QUIC support is added:
+    // 1. Check URL scheme (https:// vs quic://)
+    // 2. Route to appropriate connection method:
+    //    - https:// -> WebTransport (current implementation)
+    //    - quic:// -> Raw QUIC (to be implemented)
+    // 3. Both should result in a compatible session for moq-transport
     let client_inner = client_ref.inner.clone();
     let url_str_clone = url_str.clone();
     let result = RUNTIME.block_on(async move {
-        // Create quinn endpoint for WebTransport
-        // Using default client configuration with native certificates
+        // Create quinn endpoint for WebTransport over QUIC
         let bind_addr = "[::]:0".parse()
             .map_err(|e| format!("Failed to parse bind address: {}", e))?;
         let mut endpoint = quinn::Endpoint::client(bind_addr)
@@ -332,12 +369,23 @@ pub unsafe extern "C" fn moq_connect(
                 .map_err(|e| format!("Crypto config error: {}", e))?
         ));
         
-        // Set HTTP/3 ALPN
-        client_config.transport_config(std::sync::Arc::new(quinn::TransportConfig::default()));
+        // Configure transport - enable datagrams for MoQ datagram delivery
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_concurrent_bidi_streams(100u32.into());
+        transport_config.max_concurrent_uni_streams(100u32.into());
+        transport_config.datagram_receive_buffer_size(Some(1024 * 1024)); // 1MB buffer
+        transport_config.datagram_send_buffer_size(1024 * 1024); // 1MB send buffer
+        client_config.transport_config(std::sync::Arc::new(transport_config));
+        
         endpoint.set_default_client_config(client_config);
 
-        // Connect via WebTransport using web_transport_quinn
-        // web-transport 0.3 re-exports from web_transport_quinn, but we call it directly
+        // Connect via WebTransport (HTTP/3 over QUIC)
+        #[cfg(feature = "with_moq_draft07")]
+        log::info!("Connecting via WebTransport over QUIC to {} (Draft 07 - CloudFlare)", url_str_clone);
+        
+        #[cfg(feature = "with_moq")]
+        log::info!("Connecting via WebTransport over QUIC to {} (Draft 14 - Latest)", url_str_clone);
+        
         use web_transport_quinn::connect as wt_connect;
         let wt_session_quinn = wt_connect(&endpoint, &parsed_url)
             .await
@@ -348,7 +396,7 @@ pub unsafe extern "C" fn moq_connect(
 
         log::info!("WebTransport session established to {}", url_str_clone);
 
-        // Establish MoQ session over WebTransport
+        // Establish MoQ session over the transport
         let (moq_session, publisher, subscriber) = Session::connect(wt_session)
             .await
             .map_err(|e| format!("Failed to establish MoQ session: {}", e))?;
@@ -571,6 +619,17 @@ pub unsafe extern "C" fn moq_create_publisher(
     namespace: *const c_char,
     track_name: *const c_char,
 ) -> *mut MoqPublisher {
+    // Default to stream mode for backward compatibility
+    moq_create_publisher_ex(client, namespace, track_name, MoqDeliveryMode::MoqDeliveryStream)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn moq_create_publisher_ex(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    track_name: *const c_char,
+    delivery_mode: MoqDeliveryMode,
+) -> *mut MoqPublisher {
     if client.is_null() || namespace.is_null() || track_name.is_null() {
         set_last_error("Client, namespace, or track_name is null".to_string());
         return std::ptr::null_mut();
@@ -627,12 +686,25 @@ pub unsafe extern "C" fn moq_create_publisher(
         }
     };
 
-    // Default to stream mode (can support choosing mode later)
-    let mode = match track.stream(0) {
-        Ok(s) => PublisherMode::Stream(s),
-        Err(e) => {
-            set_last_error(format!("Failed to create stream writer: {}", e));
-            return std::ptr::null_mut();
+    // Create writer based on requested delivery mode
+    let mode = match delivery_mode {
+        MoqDeliveryMode::MoqDeliveryDatagram => {
+            match track.datagrams() {
+                Ok(d) => PublisherMode::Datagrams(d),
+                Err(e) => {
+                    set_last_error(format!("Failed to create datagram writer: {}", e));
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        MoqDeliveryMode::MoqDeliveryStream => {
+            match track.stream(0) {
+                Ok(s) => PublisherMode::Stream(s),
+                Err(e) => {
+                    set_last_error(format!("Failed to create stream writer: {}", e));
+                    return std::ptr::null_mut();
+                }
+            }
         }
     };
 
@@ -648,7 +720,7 @@ pub unsafe extern "C" fn moq_create_publisher(
         })),
     };
 
-    log::info!("Created publisher for {}/{}", namespace_str, track_name_str);
+    log::info!("Created publisher for {}/{} (mode: {:?})", namespace_str, track_name_str, delivery_mode);
     Box::into_raw(Box::new(publisher))
 }
 
@@ -702,10 +774,20 @@ pub unsafe extern "C" fn moq_publish_data(
     let result = match &mut inner.mode {
         PublisherMode::Datagrams(datagrams) => {
             // Create a datagram with metadata
+            #[cfg(feature = "with_moq")]
             let datagram = serve::Datagram {
                 group_id: 0,
                 object_id: counter_val,
                 priority: 0,
+                payload: data_bytes,
+            };
+            
+            #[cfg(feature = "with_moq_draft07")]
+            let datagram = serve::Datagram {
+                group_id: 0,
+                object_id: counter_val,
+                priority: 0,
+                status: moq::data::ObjectStatus::Object,
                 payload: data_bytes,
             };
             
@@ -843,7 +925,7 @@ pub unsafe extern "C" fn moq_subscribe(
         let mode_result = track.mode().await;
         match mode_result {
             Ok(mode) => {
-                use moq_transport::serve::TrackReaderMode;
+                use moq::serve::TrackReaderMode;
                 
                 loop {
                     let data_result = match &mode {
@@ -858,7 +940,9 @@ pub unsafe extern "C" fn moq_subscribe(
                                             let mut buffer = Vec::new();
                                             loop {
                                                 match object.read().await {
-                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
+                                                    Ok(Some(chunk)) => {
+                                                        buffer.extend_from_slice(&chunk);
+                                                    }
                                                     Ok(None) => break,
                                                     Err(_) => break,
                                                 }
@@ -882,12 +966,49 @@ pub unsafe extern "C" fn moq_subscribe(
                                 }
                             }
                         }
+                        #[cfg(feature = "with_moq")]
                         TrackReaderMode::Subgroups(subgroups) => {
-                            // Read from subgroups
+                            // Read from subgroups (Draft 14)
                             let mut subgroups = subgroups.clone();
                             match subgroups.next().await {
                                 Ok(Some(mut subgroup)) => {
                                     match subgroup.next().await {
+                                        Ok(Some(mut object)) => {
+                                            // Read all chunks from object
+                                            let mut buffer = Vec::new();
+                                            loop {
+                                                match object.read().await {
+                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
+                                                    Ok(None) => break,
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                            if !buffer.is_empty() {
+                                                Some(buffer)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                Ok(None) => {
+                                    log::info!("Subgroups ended: {:?}/{}", track_namespace_log, track_name_log);
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::error!("Subgroups read error: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                        #[cfg(feature = "with_moq_draft07")]
+                        TrackReaderMode::Subgroups(subgroups) => {
+                            // Read from subgroups (Draft 07)
+                            let mut subgroups = subgroups.clone();
+                            match subgroups.next().await {
+                                Ok(Some(mut group)) => {
+                                    match group.next().await {
                                         Ok(Some(mut object)) => {
                                             // Read all chunks from object
                                             let mut buffer = Vec::new();
@@ -922,7 +1043,7 @@ pub unsafe extern "C" fn moq_subscribe(
                             let mut datagrams = datagrams.clone();
                             match datagrams.read().await {
                                 Ok(Some(datagram)) => {
-                                    // Datagram is just bytes
+                                    // Datagram payload - API is same for both drafts
                                     Some(datagram.payload.to_vec())
                                 }
                                 Ok(None) => {
@@ -995,8 +1116,24 @@ pub unsafe extern "C" fn moq_free_str(s: *const c_char) {
 
 #[no_mangle]
 pub extern "C" fn moq_version() -> *const c_char {
-    const VERSION: &[u8] = b"moq_ffi 0.1.0 (with_moq)\0";
-    VERSION.as_ptr() as *const c_char
+    #[cfg(feature = "with_moq")]
+    {
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 14)\0";
+        return VERSION.as_ptr() as *const c_char;
+    }
+    
+    #[cfg(feature = "with_moq_draft07")]
+    {
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 07)\0";
+        return VERSION.as_ptr() as *const c_char;
+    }
+    
+    #[cfg(not(any(feature = "with_moq", feature = "with_moq_draft07")))]
+    {
+        // Stub build - no MoQ transport
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (stub)\0";
+        VERSION.as_ptr() as *const c_char
+    }
 }
 
 #[no_mangle]

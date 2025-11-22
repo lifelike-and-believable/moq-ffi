@@ -14,9 +14,26 @@ crate-type = ["staticlib", "cdylib"]
 # Features
 # ───────────────────────────────────────────────
 [features]
-# Enable full MoQ transport integration
+# Enable full MoQ transport integration (default: IETF Draft 14)
 with_moq = [
     "dep:moq-transport",
+    "dep:web-transport",
+    "dep:web-transport-quinn",
+    "dep:tokio",
+    "dep:anyhow",
+    "dep:once_cell",
+    "dep:futures",
+    "dep:url",
+    "dep:bytes",
+    "dep:quinn",
+    "dep:rustls",
+    "dep:rustls-native-certs"
+]
+
+# Use IETF Draft 7 compatible version (CloudFlare production relay)
+# Note: Mutually exclusive with with_moq (which uses Draft 14)
+with_moq_draft07 = [
+    "dep:moq-transport-draft07",
     "dep:web-transport",
     "dep:web-transport-quinn",
     "dep:tokio",
@@ -34,8 +51,12 @@ with_moq = [
 # Dependencies
 # ───────────────────────────────────────────────
 [dependencies]
-# MoQ transport stack
+# MoQ transport stack (IETF Draft 14 - latest from crates.io)
 moq-transport = { version = "0.11", optional = true }
+
+# MoQ transport stack (IETF Draft 7 - CloudFlare production)
+moq-transport-draft07 = { package = "moq-transport", git = "https://github.com/cloudflare/moq-rs.git", branch = "draft-ietf-moq-transport-07", optional = true }
+
 web-transport = { version = "0.3", optional = true }
 web-transport-quinn = { version = "0.3", optional = true }
 

@@ -3,15 +3,15 @@
 // This library provides a C-compatible FFI interface to the Rust moq-transport
 // implementation, enabling integration with C++ projects and game engines.
 
-#[cfg(feature = "with_moq")]
+#[cfg(any(feature = "with_moq", feature = "with_moq_draft07"))]
 mod backend_moq;
 
-#[cfg(not(feature = "with_moq"))]
+#[cfg(not(any(feature = "with_moq", feature = "with_moq_draft07")))]
 mod backend_stub;
 
 // Re-export the appropriate backend
-#[cfg(feature = "with_moq")]
+#[cfg(any(feature = "with_moq", feature = "with_moq_draft07"))]
 pub use backend_moq::*;
 
-#[cfg(not(feature = "with_moq"))]
+#[cfg(not(any(feature = "with_moq", feature = "with_moq_draft07")))]
 pub use backend_stub::*;
