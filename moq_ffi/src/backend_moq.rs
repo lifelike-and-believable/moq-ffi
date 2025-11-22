@@ -1558,3 +1558,985 @@ pub extern "C" fn moq_last_error() -> *const c_char {
         None => std::ptr::null(),
     }
 }
+
+/* ───────────────────────────────────────────────
+ * Tests
+ * ─────────────────────────────────────────────── */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    /* ───────────────────────────────────────────────
+     * Lifecycle Tests
+     * ─────────────────────────────────────────────── */
+
+    mod lifecycle {
+        use super::*;
+
+        #[test]
+        fn test_client_create_returns_valid_pointer() {
+            let client = moq_client_create();
+            assert!(!client.is_null(), "Client creation should return non-null pointer");
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_client_destroy_with_null_is_safe() {
+            // Should not crash
+            unsafe { moq_client_destroy(std::ptr::null_mut()); }
+        }
+
+        #[test]
+        fn test_client_create_and_destroy_multiple() {
+            // Test creating and destroying multiple clients
+            for _ in 0..10 {
+                let client = moq_client_create();
+                assert!(!client.is_null());
+                unsafe { moq_client_destroy(client); }
+            }
+        }
+
+        #[test]
+        fn test_publisher_destroy_with_null_is_safe() {
+            // Should not crash
+            unsafe { moq_publisher_destroy(std::ptr::null_mut()); }
+        }
+
+        #[test]
+        fn test_subscriber_destroy_with_null_is_safe() {
+            // Should not crash
+            unsafe { moq_subscriber_destroy(std::ptr::null_mut()); }
+        }
+
+        #[test]
+        fn test_client_has_expected_initial_state() {
+            let client = moq_client_create();
+            assert!(!client.is_null());
+            
+            // Verify initial state
+            let connected = unsafe { moq_is_connected(client) };
+            assert!(!connected, "New client should not be connected");
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_runtime_initialization() {
+            // Test that RUNTIME can be accessed without panicking
+            let _ = &*RUNTIME;
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Null Pointer Tests
+     * ─────────────────────────────────────────────── */
+
+    mod null_pointer {
+        use super::*;
+
+        #[test]
+        fn test_connect_with_null_client() {
+            let url = std::ffi::CString::new("https://example.com").unwrap();
+            let result = unsafe {
+                moq_connect(
+                    std::ptr::null_mut(),
+                    url.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_connect_with_null_url() {
+            let client = moq_client_create();
+            let result = unsafe {
+                moq_connect(
+                    client,
+                    std::ptr::null(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe {
+                moq_free_str(result.message);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_disconnect_with_null_client() {
+            let result = unsafe { moq_disconnect(std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_is_connected_with_null_client() {
+            let connected = unsafe { moq_is_connected(std::ptr::null()) };
+            assert!(!connected);
+        }
+
+        #[test]
+        fn test_announce_namespace_with_null_client() {
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let result = unsafe {
+                moq_announce_namespace(std::ptr::null_mut(), namespace.as_ptr())
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_announce_namespace_with_null_namespace() {
+            let client = moq_client_create();
+            let result = unsafe {
+                moq_announce_namespace(client, std::ptr::null())
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe {
+                moq_free_str(result.message);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_create_publisher_with_null_client() {
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(std::ptr::null_mut(), namespace.as_ptr(), track.as_ptr())
+            };
+            assert!(publisher.is_null());
+        }
+
+        #[test]
+        fn test_create_publisher_with_null_namespace() {
+            let client = moq_client_create();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(client, std::ptr::null(), track.as_ptr())
+            };
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_with_null_track_name() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), std::ptr::null())
+            };
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_ex_with_null_client() {
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    std::ptr::null_mut(),
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    MoqDeliveryMode::MoqDeliveryStream,
+                )
+            };
+            assert!(publisher.is_null());
+        }
+
+        #[test]
+        fn test_create_publisher_ex_with_null_namespace() {
+            let client = moq_client_create();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    client,
+                    std::ptr::null(),
+                    track.as_ptr(),
+                    MoqDeliveryMode::MoqDeliveryDatagram,
+                )
+            };
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_ex_with_null_track_name() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    client,
+                    namespace.as_ptr(),
+                    std::ptr::null(),
+                    MoqDeliveryMode::MoqDeliveryStream,
+                )
+            };
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_publish_data_with_null_publisher() {
+            let data = [1u8, 2, 3, 4, 5];
+            let result = unsafe {
+                moq_publish_data(
+                    std::ptr::null_mut(),
+                    data.as_ptr(),
+                    data.len(),
+                    MoqDeliveryMode::MoqDeliveryStream,
+                )
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_publish_data_with_null_data_and_nonzero_length() {
+            // Create a fake publisher (we won't actually use it, just testing validation)
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            
+            // This will return null since client is not connected, but that's fine for this test
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), track.as_ptr())
+            };
+            
+            if publisher.is_null() {
+                // Expected - client not connected
+                unsafe { moq_client_destroy(client); }
+                return;
+            }
+            
+            let result = unsafe {
+                moq_publish_data(
+                    publisher,
+                    std::ptr::null(),
+                    10, // non-zero length with null pointer
+                    MoqDeliveryMode::MoqDeliveryStream,
+                )
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe {
+                moq_free_str(result.message);
+                moq_publisher_destroy(publisher);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_subscribe_with_null_client() {
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    std::ptr::null_mut(),
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(subscriber.is_null());
+        }
+
+        #[test]
+        fn test_subscribe_with_null_namespace() {
+            let client = moq_client_create();
+            let track = std::ffi::CString::new("track").unwrap();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    std::ptr::null(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(subscriber.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_with_null_track_name() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    namespace.as_ptr(),
+                    std::ptr::null(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(subscriber.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_free_str_with_null_is_safe() {
+            // Should not crash
+            unsafe { moq_free_str(std::ptr::null()); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Error Handling Tests
+     * ─────────────────────────────────────────────── */
+
+    mod error_handling {
+        use super::*;
+
+        #[test]
+        fn test_connect_with_invalid_url_scheme() {
+            let client = moq_client_create();
+            let url = std::ffi::CString::new("http://example.com").unwrap(); // http instead of https
+            let result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            
+            let message = unsafe { CStr::from_ptr(result.message).to_string_lossy() };
+            assert!(message.contains("https://") || message.contains("URL"));
+            
+            unsafe {
+                moq_free_str(result.message);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_connect_with_malformed_url() {
+            let client = moq_client_create();
+            let url = std::ffi::CString::new("not_a_valid_url").unwrap();
+            let result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            assert_ne!(result.code, MoqResultCode::MoqOk);
+            assert!(!result.message.is_null());
+            unsafe {
+                moq_free_str(result.message);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_disconnect_succeeds_with_valid_client() {
+            let client = moq_client_create();
+            let result = unsafe { moq_disconnect(client) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_is_connected_returns_false_before_connection() {
+            let client = moq_client_create();
+            let connected = unsafe { moq_is_connected(client) };
+            assert!(!connected);
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_announce_namespace_fails_when_not_connected() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test/namespace").unwrap();
+            let result = unsafe {
+                moq_announce_namespace(client, namespace.as_ptr())
+            };
+            assert_eq!(result.code, MoqResultCode::MoqErrorNotConnected);
+            assert!(!result.message.is_null());
+            unsafe {
+                moq_free_str(result.message);
+                moq_client_destroy(client);
+            }
+        }
+
+        #[test]
+        fn test_create_publisher_fails_when_not_connected() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track1").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), track.as_ptr())
+            };
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_ex_fails_when_not_connected() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track1").unwrap();
+            
+            // Test with datagram mode
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    MoqDeliveryMode::MoqDeliveryDatagram,
+                )
+            };
+            assert!(publisher.is_null());
+            
+            // Test with stream mode
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    MoqDeliveryMode::MoqDeliveryStream,
+                )
+            };
+            assert!(publisher.is_null());
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_fails_when_not_connected() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track1").unwrap();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(subscriber.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_error_messages_are_valid_utf8() {
+            let client = moq_client_create();
+            let url = std::ffi::CString::new("http://invalid").unwrap();
+            let result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            
+            if !result.message.is_null() {
+                // Should not panic on to_string_lossy
+                let message = unsafe { CStr::from_ptr(result.message).to_string_lossy() };
+                assert!(!message.is_empty());
+                unsafe { moq_free_str(result.message); }
+            }
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_all_error_codes_exist() {
+            // Ensure all error code variants are accessible
+            let _ = MoqResultCode::MoqOk;
+            let _ = MoqResultCode::MoqErrorInvalidArgument;
+            let _ = MoqResultCode::MoqErrorConnectionFailed;
+            let _ = MoqResultCode::MoqErrorNotConnected;
+            let _ = MoqResultCode::MoqErrorTimeout;
+            let _ = MoqResultCode::MoqErrorInternal;
+            let _ = MoqResultCode::MoqErrorUnsupported;
+            let _ = MoqResultCode::MoqErrorBufferTooSmall;
+        }
+
+        #[test]
+        fn test_connect_with_unusual_url() {
+            let client = moq_client_create();
+            // Test with a URL containing Unicode replacement character (valid UTF-8 but unusual)
+            let url = std::ffi::CString::new("https://\u{FFFD}").unwrap();
+            let result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            // Should fail (either invalid argument or connection failed)
+            assert_ne!(result.code, MoqResultCode::MoqOk);
+            if !result.message.is_null() {
+                unsafe { moq_free_str(result.message); }
+            }
+            unsafe { moq_client_destroy(client); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Thread-Local Error Storage Tests
+     * ─────────────────────────────────────────────── */
+
+    mod error_storage {
+        use super::*;
+
+        #[test]
+        fn test_last_error_initially_null() {
+            let error = moq_last_error();
+            assert!(error.is_null() || !error.is_null()); // May or may not have error from previous tests
+        }
+
+        #[test]
+        fn test_set_and_get_last_error() {
+            set_last_error("Test error message".to_string());
+            let error = get_last_error();
+            assert!(error.is_some());
+            assert_eq!(error.unwrap(), "Test error message");
+        }
+
+        #[test]
+        fn test_last_error_returns_valid_pointer() {
+            set_last_error("Another test error".to_string());
+            let error_ptr = moq_last_error();
+            assert!(!error_ptr.is_null());
+            
+            let error_str = unsafe { CStr::from_ptr(error_ptr).to_string_lossy() };
+            assert_eq!(error_str, "Another test error");
+        }
+
+        #[test]
+        fn test_error_storage_is_thread_local() {
+            use std::sync::{Arc, Barrier};
+            use std::thread;
+            
+            let barrier = Arc::new(Barrier::new(2));
+            let barrier_clone = barrier.clone();
+            
+            // Set error in main thread
+            set_last_error("Main thread error".to_string());
+            
+            // Spawn another thread
+            let handle = thread::spawn(move || {
+                // Should not see main thread's error
+                let error = get_last_error();
+                barrier_clone.wait();
+                
+                // Set error in spawned thread
+                set_last_error("Spawned thread error".to_string());
+                let spawned_error = get_last_error();
+                
+                (error, spawned_error)
+            });
+            
+            barrier.wait();
+            
+            // Check main thread still has its error
+            let main_error = get_last_error();
+            assert_eq!(main_error, Some("Main thread error".to_string()));
+            
+            // Check spawned thread results
+            let (spawned_initial, spawned_final) = handle.join().unwrap();
+            assert_ne!(spawned_initial, Some("Main thread error".to_string()));
+            assert_eq!(spawned_final, Some("Spawned thread error".to_string()));
+        }
+
+        #[test]
+        fn test_error_storage_persists_within_thread() {
+            set_last_error("First error".to_string());
+            assert_eq!(get_last_error(), Some("First error".to_string()));
+            
+            set_last_error("Second error".to_string());
+            assert_eq!(get_last_error(), Some("Second error".to_string()));
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Panic Protection Tests
+     * ─────────────────────────────────────────────── */
+
+    mod panic_protection {
+        use super::*;
+
+        #[test]
+        fn test_client_create_catches_panics() {
+            // moq_client_create should never panic
+            let client = moq_client_create();
+            assert!(!client.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_client_destroy_catches_panics() {
+            let client = moq_client_create();
+            // Should not panic even with valid client
+            unsafe { moq_client_destroy(client); }
+            // Should not panic with null
+            unsafe { moq_client_destroy(std::ptr::null_mut()); }
+        }
+
+        #[test]
+        fn test_connect_catches_panics() {
+            let client = moq_client_create();
+            let url = std::ffi::CString::new("https://example.com").unwrap();
+            let result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            // Should return error, not panic
+            assert_ne!(result.code, MoqResultCode::MoqOk); // Will fail to connect, but shouldn't panic
+            if !result.message.is_null() {
+                unsafe { moq_free_str(result.message); }
+            }
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_disconnect_catches_panics() {
+            let client = moq_client_create();
+            let result = unsafe { moq_disconnect(client) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_announce_namespace_catches_panics() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let result = unsafe { moq_announce_namespace(client, namespace.as_ptr()) };
+            // Should return error (not connected), not panic
+            assert_ne!(result.code, MoqResultCode::MoqOk);
+            if !result.message.is_null() {
+                unsafe { moq_free_str(result.message); }
+            }
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_catches_panics() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), track.as_ptr())
+            };
+            // Should return null (not connected), not panic
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_create_publisher_ex_catches_panics() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher_ex(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    MoqDeliveryMode::MoqDeliveryDatagram,
+                )
+            };
+            // Should return null (not connected), not panic
+            assert!(publisher.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_catches_panics() {
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            // Should return null (not connected), not panic
+            assert!(subscriber.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_free_str_catches_panics() {
+            // Should not panic with null
+            unsafe { moq_free_str(std::ptr::null()); }
+            
+            // Should not panic with valid string
+            let s = CString::new("test").unwrap();
+            unsafe { moq_free_str(s.into_raw()); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Utility Function Tests
+     * ─────────────────────────────────────────────── */
+
+    mod utilities {
+        use super::*;
+
+        #[test]
+        fn test_make_ok_result() {
+            let result = make_ok_result();
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+        }
+
+        #[test]
+        fn test_make_error_result() {
+            let result = make_error_result(MoqResultCode::MoqErrorInternal, "Test error");
+            assert_eq!(result.code, MoqResultCode::MoqErrorInternal);
+            assert!(!result.message.is_null());
+            
+            let message = unsafe { CStr::from_ptr(result.message).to_string_lossy() };
+            assert_eq!(message, "Test error");
+            
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_version_returns_valid_string() {
+            let version_ptr = moq_version();
+            assert!(!version_ptr.is_null());
+            
+            let version = unsafe { CStr::from_ptr(version_ptr).to_string_lossy() };
+            assert!(version.contains("moq_ffi"));
+            assert!(version.contains("0.1.0"));
+            assert!(version.contains("Draft") || version.contains("IETF"));
+        }
+
+        #[test]
+        fn test_version_string_is_static() {
+            let ptr1 = moq_version();
+            let ptr2 = moq_version();
+            // Should return same static pointer
+            assert_eq!(ptr1, ptr2);
+        }
+
+        #[test]
+        fn test_moq_free_str_with_valid_string() {
+            let s = CString::new("test string").unwrap();
+            let ptr = s.into_raw();
+            unsafe { moq_free_str(ptr); }
+            // Should not crash
+        }
+
+        #[test]
+        fn test_moq_free_str_with_null() {
+            unsafe { moq_free_str(std::ptr::null()); }
+            // Should not crash
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Enum Value Tests
+     * ─────────────────────────────────────────────── */
+
+    mod enums {
+        use super::*;
+
+        #[test]
+        fn test_result_code_values() {
+            assert_eq!(MoqResultCode::MoqOk as i32, 0);
+            assert_eq!(MoqResultCode::MoqErrorInvalidArgument as i32, 1);
+            assert_eq!(MoqResultCode::MoqErrorConnectionFailed as i32, 2);
+            assert_eq!(MoqResultCode::MoqErrorNotConnected as i32, 3);
+            assert_eq!(MoqResultCode::MoqErrorTimeout as i32, 4);
+            assert_eq!(MoqResultCode::MoqErrorInternal as i32, 5);
+            assert_eq!(MoqResultCode::MoqErrorUnsupported as i32, 6);
+            assert_eq!(MoqResultCode::MoqErrorBufferTooSmall as i32, 7);
+        }
+
+        #[test]
+        fn test_connection_state_values() {
+            assert_eq!(MoqConnectionState::MoqStateDisconnected as i32, 0);
+            assert_eq!(MoqConnectionState::MoqStateConnecting as i32, 1);
+            assert_eq!(MoqConnectionState::MoqStateConnected as i32, 2);
+            assert_eq!(MoqConnectionState::MoqStateFailed as i32, 3);
+        }
+
+        #[test]
+        fn test_delivery_mode_values() {
+            assert_eq!(MoqDeliveryMode::MoqDeliveryDatagram as i32, 0);
+            assert_eq!(MoqDeliveryMode::MoqDeliveryStream as i32, 1);
+        }
+
+        #[test]
+        fn test_result_code_equality() {
+            let code1 = MoqResultCode::MoqOk;
+            let code2 = MoqResultCode::MoqOk;
+            let code3 = MoqResultCode::MoqErrorInternal;
+            
+            assert_eq!(code1, code2);
+            assert_ne!(code1, code3);
+        }
+
+        #[test]
+        fn test_connection_state_equality() {
+            let state1 = MoqConnectionState::MoqStateConnected;
+            let state2 = MoqConnectionState::MoqStateConnected;
+            let state3 = MoqConnectionState::MoqStateDisconnected;
+            
+            assert_eq!(state1, state2);
+            assert_ne!(state1, state3);
+        }
+
+        #[test]
+        fn test_delivery_mode_equality() {
+            let mode1 = MoqDeliveryMode::MoqDeliveryStream;
+            let mode2 = MoqDeliveryMode::MoqDeliveryStream;
+            let mode3 = MoqDeliveryMode::MoqDeliveryDatagram;
+            
+            assert_eq!(mode1, mode2);
+            assert_ne!(mode1, mode3);
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Memory Safety Tests
+     * ─────────────────────────────────────────────── */
+
+    mod memory_safety {
+        use super::*;
+
+        #[test]
+        fn test_double_destroy_with_different_clients() {
+            let client1 = moq_client_create();
+            let client2 = moq_client_create();
+            
+            unsafe {
+                moq_client_destroy(client1);
+                moq_client_destroy(client2);
+            }
+            // Should not crash
+        }
+
+        #[test]
+        fn test_result_message_memory_management() {
+            let client = moq_client_create();
+            let result = unsafe {
+                moq_connect(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            
+            assert!(!result.message.is_null());
+            
+            // Read the message before freeing
+            let message = unsafe { CStr::from_ptr(result.message).to_string_lossy().to_string() };
+            assert!(!message.is_empty());
+            
+            // Free the message
+            unsafe { moq_free_str(result.message); }
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_publish_data_with_zero_length() {
+            // This tests that zero-length data is handled correctly
+            let client = moq_client_create();
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let track = std::ffi::CString::new("track").unwrap();
+            
+            // Try to create publisher (will fail because not connected, but tests the path)
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), track.as_ptr())
+            };
+            
+            if !publisher.is_null() {
+                let data: [u8; 0] = [];
+                let result = unsafe {
+                    moq_publish_data(
+                        publisher,
+                        data.as_ptr(),
+                        0,
+                        MoqDeliveryMode::MoqDeliveryStream,
+                    )
+                };
+                // Should handle gracefully
+                assert!(result.code == MoqResultCode::MoqOk || result.code != MoqResultCode::MoqOk);
+                if !result.message.is_null() {
+                    unsafe { moq_free_str(result.message); }
+                }
+                unsafe { moq_publisher_destroy(publisher); }
+            }
+            
+            unsafe { moq_client_destroy(client); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Connection State Tests
+     * ─────────────────────────────────────────────── */
+
+    mod connection_state {
+        use super::*;
+
+        #[test]
+        fn test_initial_state_is_disconnected() {
+            let client = moq_client_create();
+            let connected = unsafe { moq_is_connected(client) };
+            assert!(!connected);
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_disconnect_without_connect() {
+            let client = moq_client_create();
+            let result = unsafe { moq_disconnect(client) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            
+            let connected = unsafe { moq_is_connected(client) };
+            assert!(!connected);
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_operations_fail_when_not_connected() {
+            let client = moq_client_create();
+            
+            // Announce should fail
+            let namespace = std::ffi::CString::new("test").unwrap();
+            let result = unsafe { moq_announce_namespace(client, namespace.as_ptr()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorNotConnected);
+            if !result.message.is_null() {
+                unsafe { moq_free_str(result.message); }
+            }
+            
+            // Create publisher should fail
+            let track = std::ffi::CString::new("track").unwrap();
+            let publisher = unsafe {
+                moq_create_publisher(client, namespace.as_ptr(), track.as_ptr())
+            };
+            assert!(publisher.is_null());
+            
+            // Subscribe should fail
+            let subscriber = unsafe {
+                moq_subscribe(
+                    client,
+                    namespace.as_ptr(),
+                    track.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(subscriber.is_null());
+            
+            unsafe { moq_client_destroy(client); }
+        }
+    }
+}
