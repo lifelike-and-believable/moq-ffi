@@ -13,6 +13,7 @@
 // when network is unavailable.
 
 #![cfg(feature = "with_moq_draft07")]
+#![allow(clippy::unnecessary_safety_comment)]
 
 use std::ffi::CString;
 use std::ptr;
@@ -54,7 +55,8 @@ unsafe extern "C" fn connection_state_callback(
         return;
     }
     
-    let tracker = &mut *(user_data as *mut Arc<Mutex<ConnectionStateTracker>>);
+    // user_data is a raw pointer from Arc::into_raw(Arc<Mutex<...>>)
+    let tracker = &*(user_data as *const Arc<Mutex<ConnectionStateTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.current_state = state;
         t.state_changed = true;
@@ -93,7 +95,8 @@ unsafe extern "C" fn data_received_callback(
         return;
     }
     
-    let tracker = &mut *(user_data as *mut Arc<Mutex<DataTracker>>);
+    // user_data is a raw pointer from Arc::into_raw(Arc<Mutex<...>>)
+    let tracker = &*(user_data as *const Arc<Mutex<DataTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.data_received = true;
         t.received_count += 1;
@@ -190,8 +193,9 @@ fn test_connect_to_cloudflare_relay() {
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
-        // Clean up the Arc we passed to callback
-        let _ = Arc::from_raw(tracker_ptr as *mut Arc<Mutex<ConnectionStateTracker>>);
+        // Reconstruct the Arc from the raw pointer to properly drop it
+        // tracker_ptr was created from Arc::into_raw(Arc<Mutex<ConnectionStateTracker>>)
+        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
     }
     
     println!("=== Test Complete ===\n");
@@ -234,7 +238,8 @@ fn test_connection_lifecycle() {
     // Cleanup
     unsafe {
         moq_client_destroy(client);
-        let _ = Arc::from_raw(tracker_ptr as *mut Arc<Mutex<ConnectionStateTracker>>);
+        // Reconstruct the Arc from the raw pointer to properly drop it
+        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
     }
     
     println!("=== Test Complete ===\n");
@@ -369,7 +374,8 @@ fn test_full_publish_workflow() {
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
-        let _ = Arc::from_raw(tracker_ptr as *mut Arc<Mutex<ConnectionStateTracker>>);
+        // Reconstruct the Arc from the raw pointer to properly drop it
+        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
     }
     
     println!("=== Test Complete ===\n");
@@ -422,8 +428,9 @@ fn test_multiple_clients() {
         moq_disconnect(client2);
         moq_client_destroy(client1);
         moq_client_destroy(client2);
-        let _ = Arc::from_raw(tracker_ptr1 as *mut Arc<Mutex<ConnectionStateTracker>>);
-        let _ = Arc::from_raw(tracker_ptr2 as *mut Arc<Mutex<ConnectionStateTracker>>);
+        // Reconstruct the Arcs from the raw pointers to properly drop them
+        let _ = Arc::from_raw(tracker_ptr1 as *const Arc<Mutex<ConnectionStateTracker>>);
+        let _ = Arc::from_raw(tracker_ptr2 as *const Arc<Mutex<ConnectionStateTracker>>);
     }
     
     println!("=== Test Complete ===\n");
