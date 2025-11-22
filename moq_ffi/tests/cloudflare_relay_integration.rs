@@ -55,7 +55,7 @@ unsafe extern "C" fn connection_state_callback(
         return;
     }
     
-    // user_data is a raw pointer from Arc::into_raw(Arc<Mutex<...>>)
+    // user_data is a pointer to Arc<Mutex<...>> that lives for the test duration
     let tracker = &*(user_data as *const Arc<Mutex<ConnectionStateTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.current_state = state;
@@ -95,7 +95,7 @@ unsafe extern "C" fn data_received_callback(
         return;
     }
     
-    // user_data is a raw pointer from Arc::into_raw(Arc<Mutex<...>>)
+    // user_data is a pointer to Arc<Mutex<...>> that lives for the test duration
     let tracker = &*(user_data as *const Arc<Mutex<DataTracker>>);
     if let Ok(mut t) = tracker.lock() {
         t.data_received = true;
@@ -134,7 +134,8 @@ fn test_connect_to_cloudflare_relay() {
     
     // Setup connection state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
-    let tracker_ptr = Arc::into_raw(Arc::clone(&state_tracker)) as *mut std::ffi::c_void;
+    // Pass a pointer to the Arc (not Arc::into_raw) since we keep the Arc alive for the test duration
+    let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
     
     // Connect to Cloudflare relay
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
@@ -193,9 +194,7 @@ fn test_connect_to_cloudflare_relay() {
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
-        // Reconstruct the Arc from the raw pointer to properly drop it
-        // tracker_ptr was created from Arc::into_raw(Arc<Mutex<ConnectionStateTracker>>)
-        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
+        // state_tracker will be automatically dropped when it goes out of scope
     }
     
     println!("=== Test Complete ===\n");
@@ -216,7 +215,7 @@ fn test_connection_lifecycle() {
     
     // Setup state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
-    let tracker_ptr = Arc::into_raw(Arc::clone(&state_tracker)) as *mut std::ffi::c_void;
+    let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
     
     // Attempt connection
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
@@ -238,8 +237,7 @@ fn test_connection_lifecycle() {
     // Cleanup
     unsafe {
         moq_client_destroy(client);
-        // Reconstruct the Arc from the raw pointer to properly drop it
-        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
+        // state_tracker will be automatically dropped when it goes out of scope
     }
     
     println!("=== Test Complete ===\n");
@@ -287,7 +285,7 @@ fn test_full_publish_workflow() {
     
     // Setup state tracking
     let state_tracker = Arc::new(Mutex::new(ConnectionStateTracker::new()));
-    let tracker_ptr = Arc::into_raw(Arc::clone(&state_tracker)) as *mut std::ffi::c_void;
+    let tracker_ptr = &state_tracker as *const _ as *mut std::ffi::c_void;
     
     // Connect
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
@@ -374,8 +372,7 @@ fn test_full_publish_workflow() {
     unsafe {
         moq_disconnect(client);
         moq_client_destroy(client);
-        // Reconstruct the Arc from the raw pointer to properly drop it
-        let _ = Arc::from_raw(tracker_ptr as *const Arc<Mutex<ConnectionStateTracker>>);
+        // state_tracker will be automatically dropped when it goes out of scope
     }
     
     println!("=== Test Complete ===\n");
@@ -403,10 +400,10 @@ fn test_multiple_clients() {
     
     // Setup tracking for both
     let state_tracker1 = Arc::new(Mutex::new(ConnectionStateTracker::new()));
-    let tracker_ptr1 = Arc::into_raw(Arc::clone(&state_tracker1)) as *mut std::ffi::c_void;
+    let tracker_ptr1 = &state_tracker1 as *const _ as *mut std::ffi::c_void;
     
     let state_tracker2 = Arc::new(Mutex::new(ConnectionStateTracker::new()));
-    let tracker_ptr2 = Arc::into_raw(Arc::clone(&state_tracker2)) as *mut std::ffi::c_void;
+    let tracker_ptr2 = &state_tracker2 as *const _ as *mut std::ffi::c_void;
     
     // Attempt to connect both
     let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
@@ -428,9 +425,7 @@ fn test_multiple_clients() {
         moq_disconnect(client2);
         moq_client_destroy(client1);
         moq_client_destroy(client2);
-        // Reconstruct the Arcs from the raw pointers to properly drop them
-        let _ = Arc::from_raw(tracker_ptr1 as *const Arc<Mutex<ConnectionStateTracker>>);
-        let _ = Arc::from_raw(tracker_ptr2 as *const Arc<Mutex<ConnectionStateTracker>>);
+        // state_tracker1 and state_tracker2 will be automatically dropped when they go out of scope
     }
     
     println!("=== Test Complete ===\n");
