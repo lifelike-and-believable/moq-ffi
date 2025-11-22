@@ -434,14 +434,17 @@ unsafe fn moq_connect_impl(
         match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), async {
             // Create quinn endpoint for WebTransport over QUIC
             // Try IPv6 first, fall back to IPv4 if IPv6 is unavailable
+            // This handles systems where IPv6 is disabled or not supported
             let mut endpoint = match "[::]:0".parse::<std::net::SocketAddr>() {
                 Ok(ipv6_addr) => {
+                    // Try to create IPv6 endpoint
                     match quinn::Endpoint::client(ipv6_addr) {
                         Ok(ep) => {
                             log::debug!("Created IPv6 endpoint successfully");
                             ep
                         }
                         Err(e) => {
+                            // IPv6 not available, fall back to IPv4
                             log::debug!("IPv6 endpoint creation failed ({}), falling back to IPv4", e);
                             let ipv4_addr = "0.0.0.0:0".parse()
                                 .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
@@ -450,8 +453,9 @@ unsafe fn moq_connect_impl(
                         }
                     }
                 }
+                // Note: This branch is defensive programming - "[::]:0" should always parse successfully
                 Err(_) => {
-                    log::debug!("IPv6 address parsing failed, using IPv4");
+                    log::debug!("IPv6 address parsing failed (unexpected), using IPv4");
                     let ipv4_addr = "0.0.0.0:0".parse()
                         .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
                     quinn::Endpoint::client(ipv4_addr)
