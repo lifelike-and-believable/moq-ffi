@@ -89,7 +89,7 @@ The moq-ffi project has successfully achieved comprehensive unit test coverage e
 ### 3. Error Handling Tests
 **Coverage**: Invalid arguments, error codes, not-connected states
 
-**Stub Backend (11 tests):**
+**Stub Backend (10 tests):**
 - Error code verification
 - Invalid argument handling
 - UTF-8 validation
@@ -150,17 +150,16 @@ The moq-ffi project has successfully achieved comprehensive unit test coverage e
 ---
 
 ### 6. Callback Tests
-**Coverage**: Callback invocations, null user_data
+**Coverage**: Callback invocations, null user_data, optional callbacks
 
-**Stub Backend (6 tests):**
-- `test_connection_callback_with_null_user_data`
-- `test_data_callback_with_null_user_data`
-- `test_track_callback_with_null_user_data`
-- `test_callbacks_are_optional`
-- `test_callback_invocation_safety`
-- `test_callbacks_with_invalid_pointers`
+**Stub Backend (5 tests):**
+- `test_connect_accepts_callback`
+- `test_connect_accepts_null_callback`
+- `test_subscribe_accepts_callback`
+- `test_subscribe_accepts_null_callback`
+- `test_callback_with_null_user_data`
 
-**Full Backend**: Covered in error storage and integration tests
+**Full Backend**: Callback behavior validated through connection state and error handling tests
 
 **Result**: ✅ Callback safety verified
 
