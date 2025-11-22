@@ -2063,12 +2063,9 @@ mod tests {
         }
 
         #[test]
-        fn test_connect_with_invalid_utf8_url() {
+        fn test_connect_with_unusual_url() {
             let client = moq_client_create();
-            // Create an invalid UTF-8 string
-            let _invalid_utf8 = vec![0xFFu8, 0xFE, 0xFD];
-            // Note: CString::new() with invalid UTF-8 would fail at the null byte check,
-            // not the UTF-8 check, so we use a valid one for testing
+            // Test with a URL containing Unicode replacement character (valid UTF-8 but unusual)
             let url = std::ffi::CString::new("https://\u{FFFD}").unwrap();
             let result = unsafe {
                 moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
