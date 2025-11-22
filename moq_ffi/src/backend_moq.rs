@@ -455,58 +455,27 @@ unsafe fn moq_connect_impl(
             // Create quinn endpoint for WebTransport over QUIC
             //
             // IPv4/IPv6 Selection Strategy:
-            // - Windows: Prefer IPv4 due to common IPv6 connectivity issues
-            //   Specifically, IPv6 may be enabled at the OS level but lack proper
-            //   network configuration, routing, or ISP support, causing connections
-            //   to hang or timeout when attempting to use IPv6.
-            // - Linux/macOS: Try IPv6 first (better connectivity in many networks),
-            //   fall back to IPv4 if IPv6 endpoint creation fails.
+            // Use IPv4 for all platforms to avoid IPv6 connectivity issues.
             //
-            // This prevents connection hangs on Windows when IPv6 is enabled
-            // but not functioning properly, while maintaining optimal connectivity
-            // on Unix-like systems where IPv6 is more commonly well-configured.
-            #[cfg(target_os = "windows")]
+            // Issue discovered: Even when IPv6 is enabled and endpoint creation succeeds,
+            // IPv6 routing may not work properly, causing connections to hang indefinitely.
+            // This affects not just Windows, but also Linux systems in various network
+            // environments (including CI runners, corporate networks, etc.).
+            //
+            // The tokio timeout doesn't prevent these hangs because the underlying
+            // network layer may be blocking in ways that aren't cancellable.
+            //
+            // Using IPv4 universally ensures reliable connections across all platforms
+            // and network configurations. IPv6 support can be re-enabled in the future
+            // with proper connection attempt racing (try both IPv4 and IPv6 simultaneously
+            // and use whichever connects first, similar to Happy Eyeballs algorithm).
             let mut endpoint = {
-                log::debug!("Windows platform detected, using IPv4 endpoint");
+                log::debug!("Using IPv4 endpoint for reliable connectivity");
                 let ipv4_addr = IPV4_BIND_ADDR
                     .parse()
                     .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
                 quinn::Endpoint::client(ipv4_addr)
                     .map_err(|e| format!("Failed to create IPv4 endpoint: {}", e))?
-            };
-
-            #[cfg(not(target_os = "windows"))]
-            let mut endpoint = match IPV6_BIND_ADDR.parse::<std::net::SocketAddr>() {
-                Ok(ipv6_addr) => {
-                    // Try to create IPv6 endpoint
-                    match quinn::Endpoint::client(ipv6_addr) {
-                        Ok(ep) => {
-                            log::debug!("Created IPv6 endpoint successfully");
-                            ep
-                        }
-                        Err(e) => {
-                            // IPv6 not available, fall back to IPv4
-                            log::debug!(
-                                "IPv6 endpoint creation failed ({}), falling back to IPv4",
-                                e
-                            );
-                            let ipv4_addr = IPV4_BIND_ADDR
-                                .parse()
-                                .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
-                            quinn::Endpoint::client(ipv4_addr)
-                                .map_err(|e| format!("Failed to create IPv4 endpoint: {}", e))?
-                        }
-                    }
-                }
-                // Note: This branch is defensive programming - IPV6_BIND_ADDR should always parse successfully
-                Err(_) => {
-                    log::debug!("IPv6 address parsing failed (unexpected), using IPv4");
-                    let ipv4_addr = IPV4_BIND_ADDR
-                        .parse()
-                        .map_err(|e| format!("Failed to parse IPv4 bind address: {}", e))?;
-                    quinn::Endpoint::client(ipv4_addr)
-                        .map_err(|e| format!("Failed to create IPv4 endpoint: {}", e))?
-                }
             };
 
             // Configure TLS with native root certificates
