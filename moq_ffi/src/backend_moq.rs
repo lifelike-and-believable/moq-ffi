@@ -24,6 +24,10 @@ use std::collections::HashMap;
 use tokio::runtime::Runtime;
 use once_cell::sync::Lazy;
 
+// Compile-time check: Ensure only one MoQ version feature is enabled
+#[cfg(all(feature = "with_moq", feature = "with_moq_draft07"))]
+compile_error!("Cannot enable both 'with_moq' and 'with_moq_draft07' features simultaneously. Choose one based on your relay server.");
+
 // Import the appropriate moq-transport version based on feature flags
 #[cfg(feature = "with_moq")]
 use moq_transport as moq;
@@ -921,10 +925,6 @@ pub unsafe extern "C" fn moq_subscribe(
         let mode_result = track.mode().await;
         match mode_result {
             Ok(mode) => {
-                #[cfg(feature = "with_moq")]
-                use moq::serve::TrackReaderMode;
-                
-                #[cfg(feature = "with_moq_draft07")]
                 use moq::serve::TrackReaderMode;
                 
                 loop {
@@ -941,9 +941,6 @@ pub unsafe extern "C" fn moq_subscribe(
                                             loop {
                                                 match object.read().await {
                                                     Ok(Some(chunk)) => {
-                                                        #[cfg(feature = "with_moq")]
-                                                        buffer.extend_from_slice(&chunk);
-                                                        #[cfg(feature = "with_moq_draft07")]
                                                         buffer.extend_from_slice(&chunk);
                                                     }
                                                     Ok(None) => break,
@@ -1047,11 +1044,7 @@ pub unsafe extern "C" fn moq_subscribe(
                             match datagrams.read().await {
                                 Ok(Some(datagram)) => {
                                     // Datagram payload - API is same for both drafts
-                                    #[cfg(feature = "with_moq")]
-                                    let payload = datagram.payload.to_vec();
-                                    #[cfg(feature = "with_moq_draft07")]
-                                    let payload = datagram.payload.to_vec();
-                                    Some(payload)
+                                    Some(datagram.payload.to_vec())
                                 }
                                 Ok(None) => {
                                     log::info!("Datagrams ended: {:?}/{}", track_namespace_log, track_name_log);
@@ -1124,12 +1117,23 @@ pub unsafe extern "C" fn moq_free_str(s: *const c_char) {
 #[no_mangle]
 pub extern "C" fn moq_version() -> *const c_char {
     #[cfg(feature = "with_moq")]
-    const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 14)\0";
+    {
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 14)\0";
+        return VERSION.as_ptr() as *const c_char;
+    }
     
     #[cfg(feature = "with_moq_draft07")]
-    const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 07)\0";
+    {
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 07)\0";
+        return VERSION.as_ptr() as *const c_char;
+    }
     
-    VERSION.as_ptr() as *const c_char
+    #[cfg(not(any(feature = "with_moq", feature = "with_moq_draft07")))]
+    {
+        // Stub build - no MoQ transport
+        const VERSION: &[u8] = b"moq_ffi 0.1.0 (stub)\0";
+        VERSION.as_ptr() as *const c_char
+    }
 }
 
 #[no_mangle]
