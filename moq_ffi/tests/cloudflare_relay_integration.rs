@@ -42,7 +42,16 @@ fn init_crypto_provider() {
     }
 }
 
-// Cloudflare relay URL (production)
+// MoQ Relay URLs for testing
+// Note: As of draft-07, the public relay was at quic.video
+// For latest information, see: https://github.com/cloudflare/moq-rs/tree/draft-ietf-moq-transport-07
+// 
+// Known working relays (check moq-rs documentation for current status):
+// - https://quic.video (draft-07, may require specific hosting)
+// - https://interop-relay.cloudflare.mediaoverquic.com:443 (draft-14)
+//
+// NOTE: These tests require network access and will fail in restricted CI environments
+// where DNS resolution or outbound HTTPS connections are blocked.
 const CLOUDFLARE_RELAY_URL: &str = "https://relay.cloudflare.mediaoverquic.com";
 
 // Timeout for async operations
