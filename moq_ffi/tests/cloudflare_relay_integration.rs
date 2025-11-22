@@ -24,6 +24,24 @@ use std::time::Duration;
 // Integration tests run as external crates and import via the library name
 use moq_ffi::*;
 
+// Initialize CryptoProvider for rustls (required for TLS connections)
+// This must be called before any TLS operations
+#[cfg(test)]
+fn init_crypto_provider() {
+    use rustls::crypto::CryptoProvider;
+    // Install default provider (aws-lc-rs) if not already installed
+    // Returns Ok(()) if installed successfully, Err if already installed
+    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
+        Ok(()) => {
+            println!("CryptoProvider installed successfully");
+        }
+        Err(_) => {
+            // Already installed, this is fine
+            println!("CryptoProvider already installed");
+        }
+    }
+}
+
 // Cloudflare relay URL (production)
 const CLOUDFLARE_RELAY_URL: &str = "https://relay.cloudflare.mediaoverquic.com";
 
@@ -132,8 +150,11 @@ where
 fn test_connect_to_cloudflare_relay() {
     println!("\n=== Test: Connect to Cloudflare Relay ===");
     
+    // Initialize CryptoProvider before any TLS operations
+    init_crypto_provider();
+    
     // Create client
-    let client = unsafe { moq_client_create() };
+    let client = moq_client_create();
     assert!(!client.is_null(), "Failed to create client");
     
     // Setup connection state tracking
@@ -154,12 +175,10 @@ fn test_connect_to_cloudflare_relay() {
     
     // Check connection initiation
     println!("Connect result: code={:?}", result.code);
-    if result.code != MoqResultCode::MoqOk {
-        if !result.message.is_null() {
-            let msg = unsafe { std::ffi::CStr::from_ptr(result.message) };
-            println!("Error message: {}", msg.to_string_lossy());
-            unsafe { moq_free_str(result.message) };
-        }
+    if result.code != MoqResultCode::MoqOk && !result.message.is_null() {
+        let msg = unsafe { std::ffi::CStr::from_ptr(result.message) };
+        println!("Error message: {}", msg.to_string_lossy());
+        unsafe { moq_free_str(result.message) };
     }
     
     // Note: Connection may take time, so we check for either success or in-progress
@@ -209,7 +228,10 @@ fn test_connect_to_cloudflare_relay() {
 fn test_connection_lifecycle() {
     println!("\n=== Test: Connection Lifecycle ===");
     
-    let client = unsafe { moq_client_create() };
+    // Initialize CryptoProvider before any TLS operations
+    init_crypto_provider();
+    
+    let client = moq_client_create();
     assert!(!client.is_null());
     
     // Initially should be disconnected
@@ -252,7 +274,7 @@ fn test_connection_lifecycle() {
 fn test_announce_namespace_requires_connection() {
     println!("\n=== Test: Announce Namespace (Requires Connection) ===");
     
-    let client = unsafe { moq_client_create() };
+    let client = moq_client_create();
     assert!(!client.is_null());
     
     // Try to announce without connecting first
@@ -284,7 +306,10 @@ fn test_announce_namespace_requires_connection() {
 fn test_full_publish_workflow() {
     println!("\n=== Test: Full Publish Workflow ===");
     
-    let client = unsafe { moq_client_create() };
+    // Initialize CryptoProvider before any TLS operations
+    init_crypto_provider();
+    
+    let client = moq_client_create();
     assert!(!client.is_null());
     
     // Setup state tracking
@@ -387,9 +412,12 @@ fn test_full_publish_workflow() {
 fn test_multiple_clients() {
     println!("\n=== Test: Multiple Clients ===");
     
+    // Initialize CryptoProvider before any TLS operations
+    init_crypto_provider();
+    
     // Create two clients
-    let client1 = unsafe { moq_client_create() };
-    let client2 = unsafe { moq_client_create() };
+    let client1 = moq_client_create();
+    let client2 = moq_client_create();
     
     assert!(!client1.is_null());
     assert!(!client2.is_null());
@@ -440,7 +468,7 @@ fn test_multiple_clients() {
 fn test_error_handling_invalid_url() {
     println!("\n=== Test: Error Handling - Invalid URL ===");
     
-    let client = unsafe { moq_client_create() };
+    let client = moq_client_create();
     assert!(!client.is_null());
     
     // Try to connect with invalid URL
@@ -476,7 +504,7 @@ fn test_version_and_utilities() {
     println!("\n=== Test: Version and Utility Functions ===");
     
     // Test version function
-    let version = unsafe { moq_version() };
+    let version = moq_version();
     assert!(!version.is_null());
     
     let version_str = unsafe { std::ffi::CStr::from_ptr(version) };
@@ -484,7 +512,7 @@ fn test_version_and_utilities() {
     assert!(!version_str.to_bytes().is_empty(), "Version should not be empty");
     
     // Test last_error (should be null initially)
-    let last_error = unsafe { moq_last_error() };
+    let last_error = moq_last_error();
     println!("Initial last_error: {:?}", last_error);
     
     println!("=== Test Complete ===\n");
