@@ -108,18 +108,51 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
  * Client Management
  * ─────────────────────────────────────────────── */
 
+/// Creates a new MoQ client instance (stub implementation).
+///
+/// # Returns
+/// A pointer to the newly created client, or null on failure.
+/// The client must be destroyed with `moq_client_destroy()` when no longer needed.
+///
+/// # Thread Safety
+/// This function is thread-safe and can be called from any thread.
 #[no_mangle]
 pub extern "C" fn moq_client_create() -> *mut MoqClient {
-    Box::into_raw(Box::new(MoqClient { _dummy: 0 }))
+    std::panic::catch_unwind(|| {
+        Box::into_raw(Box::new(MoqClient { _dummy: 0 }))
+    }).unwrap_or(std::ptr::null_mut())
 }
 
+/// Destroys a MoQ client and releases all associated resources (stub implementation).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null (null pointers are safely ignored)
+/// - `client` must not be accessed after this function returns
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the client to destroy, or null (null is safely ignored)
 #[no_mangle]
 pub unsafe extern "C" fn moq_client_destroy(client: *mut MoqClient) {
-    if !client.is_null() {
-        let _ = Box::from_raw(client);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !client.is_null() {
+            let _ = Box::from_raw(client);
+        }
+    });
 }
 
+/// Connects to a MoQ relay server (stub implementation - always fails).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `url` must be a valid null-terminated C string pointer
+/// - `url` must not be null
+/// - This function is thread-safe
+///
+/// # Returns
+/// Always returns MoqErrorUnsupported in stub build
 #[no_mangle]
 pub unsafe extern "C" fn moq_connect(
     client: *mut MoqClient,
@@ -127,81 +160,136 @@ pub unsafe extern "C" fn moq_connect(
     _connection_callback: MoqConnectionCallback,
     _user_data: *mut std::ffi::c_void,
 ) -> MoqResult {
-    if client.is_null() || url.is_null() {
-        return make_error_result(
-            MoqResultCode::MoqErrorInvalidArgument,
-            "Client or URL is null",
-        );
-    }
+    std::panic::catch_unwind(|| {
+        if client.is_null() || url.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Client or URL is null",
+            );
+        }
 
-    // Stub: always return unsupported
-    make_error_result(
-        MoqResultCode::MoqErrorUnsupported,
-        "Stub backend: MoQ transport not enabled. Rebuild with --features with_moq",
-    )
+        // Stub: always return unsupported
+        make_error_result(
+            MoqResultCode::MoqErrorUnsupported,
+            "Stub backend: MoQ transport not enabled. Rebuild with --features with_moq",
+        )
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
 }
 
+/// Disconnects from the MoQ relay server (stub implementation).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_disconnect(client: *mut MoqClient) -> MoqResult {
-    if client.is_null() {
-        return make_error_result(MoqResultCode::MoqErrorInvalidArgument, "Client is null");
-    }
-    make_ok_result()
+    std::panic::catch_unwind(|| {
+        if client.is_null() {
+            return make_error_result(MoqResultCode::MoqErrorInvalidArgument, "Client is null");
+        }
+        make_ok_result()
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
 }
 
+/// Checks if the client is currently connected (stub implementation - always returns false).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` may be null (returns false)
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_is_connected(client: *const MoqClient) -> bool {
-    if client.is_null() {
-        return false;
-    }
-    false // Stub: never connected
+    std::panic::catch_unwind(|| {
+        if client.is_null() {
+            return false;
+        }
+        false // Stub: never connected
+    }).unwrap_or(false)
 }
 
 /* ───────────────────────────────────────────────
  * Publishing
  * ─────────────────────────────────────────────── */
 
+/// Announces a namespace to the MoQ relay server (stub implementation).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_announce_namespace(
     client: *mut MoqClient,
     namespace: *const c_char,
 ) -> MoqResult {
-    if client.is_null() || namespace.is_null() {
-        return make_error_result(
-            MoqResultCode::MoqErrorInvalidArgument,
-            "Client or namespace is null",
-        );
-    }
+    std::panic::catch_unwind(|| {
+        if client.is_null() || namespace.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Client or namespace is null",
+            );
+        }
 
-    make_error_result(
-        MoqResultCode::MoqErrorUnsupported,
-        "Stub backend: MoQ transport not enabled",
-    )
+        make_error_result(
+            MoqResultCode::MoqErrorUnsupported,
+            "Stub backend: MoQ transport not enabled",
+        )
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
 }
 
+/// Creates a publisher for a specific track (stub implementation - always returns null).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `track_name` must be a valid null-terminated C string pointer
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_create_publisher(
     client: *mut MoqClient,
     namespace: *const c_char,
     track_name: *const c_char,
 ) -> *mut MoqPublisher {
-    if client.is_null() || namespace.is_null() || track_name.is_null() {
-        return std::ptr::null_mut();
-    }
+    std::panic::catch_unwind(|| {
+        if client.is_null() || namespace.is_null() || track_name.is_null() {
+            return std::ptr::null_mut();
+        }
 
-    std::ptr::null_mut() // Stub: can't create publisher
+        std::ptr::null_mut() // Stub: can't create publisher
+    }).unwrap_or(std::ptr::null_mut())
 }
 
+/// Destroys a publisher and releases its resources (stub implementation).
+///
+/// # Safety
+/// - `publisher` must be a valid pointer returned from `moq_create_publisher()`
+/// - `publisher` must not be null (null pointers are safely ignored)
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_publisher_destroy(publisher: *mut MoqPublisher) {
-    if !publisher.is_null() {
-        // Note: In stub backend, moq_create_publisher always returns null,
-        // so this path should never be reached. This is a placeholder for
-        // the full implementation.
-        let _ = Box::from_raw(publisher);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !publisher.is_null() {
+            // Note: In stub backend, moq_create_publisher always returns null,
+            // so this path should never be reached. This is a placeholder for
+            // the full implementation.
+            let _ = Box::from_raw(publisher);
+        }
+    });
 }
 
+/// Publishes data to a track (stub implementation).
+///
+/// # Safety
+/// - `publisher` must be a valid pointer returned from `moq_create_publisher()`
+/// - `data` must be a valid pointer to a buffer of at least `_data_len` bytes
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_publish_data(
     publisher: *mut MoqPublisher,
@@ -209,23 +297,34 @@ pub unsafe extern "C" fn moq_publish_data(
     _data_len: usize,
     _delivery_mode: MoqDeliveryMode,
 ) -> MoqResult {
-    if publisher.is_null() || data.is_null() {
-        return make_error_result(
-            MoqResultCode::MoqErrorInvalidArgument,
-            "Publisher or data is null",
-        );
-    }
+    std::panic::catch_unwind(|| {
+        if publisher.is_null() || data.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Publisher or data is null",
+            );
+        }
 
-    make_error_result(
-        MoqResultCode::MoqErrorUnsupported,
-        "Stub backend: MoQ transport not enabled",
-    )
+        make_error_result(
+            MoqResultCode::MoqErrorUnsupported,
+            "Stub backend: MoQ transport not enabled",
+        )
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
 }
 
 /* ───────────────────────────────────────────────
  * Subscribing
  * ─────────────────────────────────────────────── */
 
+/// Subscribes to a track on the MoQ relay server (stub implementation - always returns null).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `track_name` must be a valid null-terminated C string pointer
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_subscribe(
     client: *mut MoqClient,
@@ -234,40 +333,74 @@ pub unsafe extern "C" fn moq_subscribe(
     _data_callback: MoqDataCallback,
     _user_data: *mut std::ffi::c_void,
 ) -> *mut MoqSubscriber {
-    if client.is_null() || namespace.is_null() || track_name.is_null() {
-        return std::ptr::null_mut();
-    }
+    std::panic::catch_unwind(|| {
+        if client.is_null() || namespace.is_null() || track_name.is_null() {
+            return std::ptr::null_mut();
+        }
 
-    std::ptr::null_mut() // Stub: can't create subscriber
+        std::ptr::null_mut() // Stub: can't create subscriber
+    }).unwrap_or(std::ptr::null_mut())
 }
 
+/// Destroys a subscriber and releases its resources (stub implementation).
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()`
+/// - `subscriber` must not be null (null pointers are safely ignored)
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_subscriber_destroy(subscriber: *mut MoqSubscriber) {
-    if !subscriber.is_null() {
-        // Note: In stub backend, moq_subscribe always returns null,
-        // so this path should never be reached. This is a placeholder for
-        // the full implementation.
-        let _ = Box::from_raw(subscriber);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !subscriber.is_null() {
+            // Note: In stub backend, moq_subscribe always returns null,
+            // so this path should never be reached. This is a placeholder for
+            // the full implementation.
+            let _ = Box::from_raw(subscriber);
+        }
+    });
 }
 
 /* ───────────────────────────────────────────────
  * Utilities
  * ─────────────────────────────────────────────── */
 
+/// Frees a string allocated by the FFI library.
+///
+/// # Safety
+/// - `s` must be a valid pointer returned by a moq_ffi function that requires freeing
+/// - `s` must not be null (null pointers are safely ignored)
+/// - `s` must not be accessed after this function returns
+/// - This function is thread-safe
 #[no_mangle]
 pub unsafe extern "C" fn moq_free_str(s: *const c_char) {
-    if !s.is_null() {
-        let _ = CString::from_raw(s as *mut c_char);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !s.is_null() {
+            let _ = CString::from_raw(s as *mut c_char);
+        }
+    });
 }
 
+/// Returns the version string of the library (stub implementation).
+///
+/// # Returns
+/// A pointer to a static null-terminated C string containing the version.
+/// This string must NOT be freed - it is a static string.
+///
+/// # Thread Safety
+/// This function is thread-safe.
 #[no_mangle]
 pub extern "C" fn moq_version() -> *const c_char {
     const VERSION: &[u8] = b"moq_ffi 0.1.0 (stub)\0";
     VERSION.as_ptr() as *const c_char
 }
 
+/// Returns the last error message for this thread (stub implementation).
+///
+/// # Returns
+/// Always returns null in stub build (no error tracking).
+///
+/// # Thread Safety
+/// This function is thread-safe.
 #[no_mangle]
 pub extern "C" fn moq_last_error() -> *const c_char {
     std::ptr::null() // Stub: no thread-local error tracking

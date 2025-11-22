@@ -59,7 +59,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 // Thread-local error storage
 thread_local! {
-    static LAST_ERROR: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 fn set_last_error(error: String) {
@@ -218,33 +218,115 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
  * Client Management
  * ─────────────────────────────────────────────── */
 
+/// Creates a new MoQ client instance.
+///
+/// # Returns
+/// A pointer to the newly created client, or null on failure.
+/// The client must be destroyed with `moq_client_destroy()` when no longer needed.
+///
+/// # Thread Safety
+/// This function is thread-safe and can be called from any thread.
 #[no_mangle]
 pub extern "C" fn moq_client_create() -> *mut MoqClient {
-    let client = MoqClient {
-        inner: Arc::new(Mutex::new(ClientInner {
-            connected: false,
-            url: None,
-            session: None,
-            publisher: None,
-            subscriber: None,
-            connection_callback: None,
-            connection_user_data: 0,
-            announced_namespaces: HashMap::new(),
-            session_task: None,
-        })),
-    };
-    Box::into_raw(Box::new(client))
+    std::panic::catch_unwind(|| {
+        let client = MoqClient {
+            inner: Arc::new(Mutex::new(ClientInner {
+                connected: false,
+                url: None,
+                session: None,
+                publisher: None,
+                subscriber: None,
+                connection_callback: None,
+                connection_user_data: 0,
+                announced_namespaces: HashMap::new(),
+                session_task: None,
+            })),
+        };
+        Box::into_raw(Box::new(client))
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_client_create");
+        set_last_error("Internal panic occurred in moq_client_create".to_string());
+        std::ptr::null_mut()
+    })
 }
 
+/// Destroys a MoQ client and releases all associated resources.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null (null pointers are safely ignored)
+/// - `client` must not be accessed after this function returns
+/// - This function is thread-safe
+/// - Active connections will be closed and async tasks will be aborted
+///
+/// # Parameters
+/// - `client`: Pointer to the client to destroy, or null (null is safely ignored)
 #[no_mangle]
 pub unsafe extern "C" fn moq_client_destroy(client: *mut MoqClient) {
-    if !client.is_null() {
-        let _ = Box::from_raw(client);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !client.is_null() {
+            let client_box = Box::from_raw(client);
+            
+            // Clean up resources properly
+            if let Ok(mut inner) = client_box.inner.lock() {
+                // Abort session task if running
+                if let Some(task) = inner.session_task.take() {
+                    task.abort();
+                }
+                // Clear all resources
+                inner.announced_namespaces.clear();
+                inner.publisher = None;
+                inner.subscriber = None;
+                inner.session = None;
+                inner.connected = false;
+            }
+            
+            drop(client_box);
+        }
+    });
+    // Silently handle panics - destructor should not propagate panics
 }
 
+/// Connects to a MoQ relay server.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `url` must be a valid null-terminated C string pointer
+/// - `url` must not be null
+/// - `url` must be a valid HTTPS URL for WebTransport over QUIC
+/// - `connection_callback` may be null (no callback will be invoked)
+/// - `user_data` will be passed to the callback and may be null
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+/// - `url`: HTTPS URL of the relay server (WebTransport over QUIC)
+/// - `connection_callback`: Optional callback for connection state changes
+/// - `user_data`: User data pointer passed to the callback
+///
+/// # Returns
+/// `MoqResult` with status code and error message (if any)
 #[no_mangle]
 pub unsafe extern "C" fn moq_connect(
+    client: *mut MoqClient,
+    url: *const c_char,
+    connection_callback: MoqConnectionCallback,
+    user_data: *mut std::ffi::c_void,
+) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        moq_connect_impl(client, url, connection_callback, user_data)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_connect");
+        set_last_error("Internal panic occurred in moq_connect".to_string());
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred"
+        )
+    })
+}
+
+unsafe fn moq_connect_impl(
     client: *mut MoqClient,
     url: *const c_char,
     connection_callback: MoqConnectionCallback,
@@ -304,9 +386,11 @@ pub unsafe extern "C" fn moq_connect(
     inner.connection_user_data = user_data as usize;
     inner.url = Some(url_str.clone());
 
-    // Notify connecting state
+    // Notify connecting state (with panic protection)
     if let Some(callback) = connection_callback {
-        callback(user_data, MoqConnectionState::MoqStateConnecting);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(user_data, MoqConnectionState::MoqStateConnecting);
+        }));
     }
 
     // Parse URL
@@ -315,7 +399,9 @@ pub unsafe extern "C" fn moq_connect(
         Err(e) => {
             set_last_error(format!("Failed to parse URL: {}", e));
             if let Some(callback) = connection_callback {
-                callback(user_data, MoqConnectionState::MoqStateFailed);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback(user_data, MoqConnectionState::MoqStateFailed);
+                }));
             }
             return make_error_result(
                 MoqResultCode::MoqErrorInvalidArgument,
@@ -410,9 +496,11 @@ pub unsafe extern "C" fn moq_connect(
         inner.subscriber = Some(subscriber);
         inner.connected = true;
 
-        // Notify connection success via callback
+        // Notify connection success via callback (with panic protection)
         if let Some(callback) = inner.connection_callback {
-            callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateConnected);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateConnected);
+            }));
         }
 
         // Spawn task to run the session
@@ -435,11 +523,24 @@ pub unsafe extern "C" fn moq_connect(
             log::error!("Connection failed: {}", e);
             set_last_error(e.clone());
             
-            // Notify connection failure
-            let mut inner = client_ref.inner.lock().unwrap();
+            // Notify connection failure and clean up partial state
+            let inner_result = client_ref.inner.lock();
+            let mut inner = match inner_result {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::warn!("Mutex poisoned during connection failure, recovering");
+                    poisoned.into_inner()
+                }
+            };
             inner.connected = false;
+            inner.url = None;
+            inner.connection_callback = None;
+            inner.connection_user_data = 0;
+            
             if let Some(callback) = connection_callback {
-                callback(user_data, MoqConnectionState::MoqStateFailed);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback(user_data, MoqConnectionState::MoqStateFailed);
+                }));
             }
             
             make_error_result(
@@ -450,68 +551,140 @@ pub unsafe extern "C" fn moq_connect(
     }
 }
 
+/// Disconnects from the MoQ relay server.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - This function is thread-safe
+/// - Closes active connection and aborts async tasks
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+///
+/// # Returns
+/// `MoqResult` with status code and error message (if any)
 #[no_mangle]
 pub unsafe extern "C" fn moq_disconnect(client: *mut MoqClient) -> MoqResult {
-    if client.is_null() {
-        set_last_error("Client is null".to_string());
-        return make_error_result(MoqResultCode::MoqErrorInvalidArgument, "Client is null");
-    }
-
-    let client_ref = &*client;
-    let mut inner = match client_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => {
-            set_last_error("Failed to lock client mutex".to_string());
-            return make_error_result(
-                MoqResultCode::MoqErrorInternal,
-                "Failed to lock client mutex",
-            );
+    std::panic::catch_unwind(|| {
+        if client.is_null() {
+            set_last_error("Client is null".to_string());
+            return make_error_result(MoqResultCode::MoqErrorInvalidArgument, "Client is null");
         }
-    };
 
-    // Abort session task if running
-    if let Some(task) = inner.session_task.take() {
-        task.abort();
-    }
+        let client_ref = &*client;
+        let inner_result = client_ref.inner.lock();
+        let mut inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned during disconnect, recovering");
+                poisoned.into_inner()
+            }
+        };
 
-    // Clear session state
-    inner.session = None;
-    inner.publisher = None;
-    inner.subscriber = None;
-    inner.announced_namespaces.clear();
-    inner.connected = false;
-    inner.url = None;
+        // Abort session task if running
+        if let Some(task) = inner.session_task.take() {
+            task.abort();
+        }
 
-    // Notify disconnected state
-    if let Some(callback) = inner.connection_callback {
-        callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateDisconnected);
-    }
+        // Clear session state
+        inner.session = None;
+        inner.publisher = None;
+        inner.subscriber = None;
+        inner.announced_namespaces.clear();
+        inner.connected = false;
+        inner.url = None;
 
-    log::info!("Disconnected from MoQ server");
-    make_ok_result()
+        // Notify disconnected state (with panic protection)
+        if let Some(callback) = inner.connection_callback {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                callback(inner.connection_user_data as *mut std::ffi::c_void, MoqConnectionState::MoqStateDisconnected);
+            }));
+        }
+
+        log::info!("Disconnected from MoQ server");
+        make_ok_result()
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_disconnect");
+        set_last_error("Internal panic occurred in moq_disconnect".to_string());
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred"
+        )
+    })
 }
 
+/// Checks if the client is currently connected to a relay server.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` may be null (returns false)
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+///
+/// # Returns
+/// `true` if connected, `false` otherwise (including if client is null)
 #[no_mangle]
 pub unsafe extern "C" fn moq_is_connected(client: *const MoqClient) -> bool {
-    if client.is_null() {
-        return false;
-    }
+    std::panic::catch_unwind(|| {
+        if client.is_null() {
+            return false;
+        }
 
-    let client_ref = &*client;
-    let inner = match client_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => return false,
-    };
+        let client_ref = &*client;
+        let inner_result = client_ref.inner.lock();
+        let inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned in moq_is_connected, recovering");
+                poisoned.into_inner()
+            }
+        };
 
-    inner.connected
+        inner.connected
+    }).unwrap_or(false)
 }
 
 /* ───────────────────────────────────────────────
  * Publishing
  * ─────────────────────────────────────────────── */
 
+/// Announces a namespace to the MoQ relay server.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `namespace` must not be null
+/// - Client must be connected before calling this function
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+/// - `namespace`: Namespace string (slash-separated path, e.g., "example/namespace")
+///
+/// # Returns
+/// `MoqResult` with status code and error message (if any)
 #[no_mangle]
 pub unsafe extern "C" fn moq_announce_namespace(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        moq_announce_namespace_impl(client, namespace)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_announce_namespace");
+        set_last_error("Internal panic occurred in moq_announce_namespace".to_string());
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred"
+        )
+    })
+}
+
+unsafe fn moq_announce_namespace_impl(
     client: *mut MoqClient,
     namespace: *const c_char,
 ) -> MoqResult {
@@ -535,14 +708,12 @@ pub unsafe extern "C" fn moq_announce_namespace(
     };
 
     let client_ref = &*client;
-    let inner = match client_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => {
-            set_last_error("Failed to lock client mutex".to_string());
-            return make_error_result(
-                MoqResultCode::MoqErrorInternal,
-                "Failed to lock client mutex",
-            );
+    let inner_result = client_ref.inner.lock();
+    let inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_announce_namespace, recovering");
+            poisoned.into_inner()
         }
     };
 
@@ -556,14 +727,12 @@ pub unsafe extern "C" fn moq_announce_namespace(
 
     // Get mutable reference for announcing
     drop(inner);
-    let mut inner = match client_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => {
-            set_last_error("Failed to lock client mutex".to_string());
-            return make_error_result(
-                MoqResultCode::MoqErrorInternal,
-                "Failed to lock client mutex",
-            );
+    let inner_result = client_ref.inner.lock();
+    let mut inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_announce_namespace, recovering");
+            poisoned.into_inner()
         }
     };
 
@@ -613,6 +782,26 @@ pub unsafe extern "C" fn moq_announce_namespace(
     make_ok_result()
 }
 
+/// Creates a publisher for a specific track (stream mode by default).
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `namespace` must not be null
+/// - `track_name` must be a valid null-terminated C string pointer
+/// - `track_name` must not be null
+/// - Namespace must be announced before creating publisher
+/// - Client must be connected
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+/// - `namespace`: Namespace string (must be previously announced)
+/// - `track_name`: Track name string
+///
+/// # Returns
+/// Pointer to the created publisher, or null on failure
 #[no_mangle]
 pub unsafe extern "C" fn moq_create_publisher(
     client: *mut MoqClient,
@@ -623,8 +812,44 @@ pub unsafe extern "C" fn moq_create_publisher(
     moq_create_publisher_ex(client, namespace, track_name, MoqDeliveryMode::MoqDeliveryStream)
 }
 
+/// Creates a publisher for a specific track with explicit delivery mode.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `namespace` must not be null
+/// - `track_name` must be a valid null-terminated C string pointer
+/// - `track_name` must not be null
+/// - Namespace must be announced before creating publisher
+/// - Client must be connected
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+/// - `namespace`: Namespace string (must be previously announced)
+/// - `track_name`: Track name string
+/// - `delivery_mode`: Delivery mode (stream or datagram)
+///
+/// # Returns
+/// Pointer to the created publisher, or null on failure
 #[no_mangle]
 pub unsafe extern "C" fn moq_create_publisher_ex(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    track_name: *const c_char,
+    delivery_mode: MoqDeliveryMode,
+) -> *mut MoqPublisher {
+    std::panic::catch_unwind(|| {
+        moq_create_publisher_ex_impl(client, namespace, track_name, delivery_mode)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_create_publisher_ex");
+        set_last_error("Internal panic occurred in moq_create_publisher_ex".to_string());
+        std::ptr::null_mut()
+    })
+}
+
+unsafe fn moq_create_publisher_ex_impl(
     client: *mut MoqClient,
     namespace: *const c_char,
     track_name: *const c_char,
@@ -724,14 +949,46 @@ pub unsafe extern "C" fn moq_create_publisher_ex(
     Box::into_raw(Box::new(publisher))
 }
 
+/// Destroys a publisher and releases its resources.
+///
+/// # Safety
+/// - `publisher` must be a valid pointer returned from `moq_create_publisher()` or `moq_create_publisher_ex()`
+/// - `publisher` must not be null (null pointers are safely ignored)
+/// - `publisher` must not be accessed after this function returns
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `publisher`: Pointer to the publisher to destroy, or null (null is safely ignored)
 #[no_mangle]
 pub unsafe extern "C" fn moq_publisher_destroy(publisher: *mut MoqPublisher) {
-    if !publisher.is_null() {
-        let _ = Box::from_raw(publisher);
-        log::debug!("Destroyed publisher");
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !publisher.is_null() {
+            let _ = Box::from_raw(publisher);
+            log::debug!("Destroyed publisher");
+        }
+    });
+    // Silently handle panics - destructor should not propagate panics
 }
 
+/// Publishes data to a track.
+///
+/// # Safety
+/// - `publisher` must be a valid pointer returned from `moq_create_publisher()` or `moq_create_publisher_ex()`
+/// - `publisher` must not be null
+/// - `data` must be a valid pointer to a buffer of at least `data_len` bytes
+/// - `data` must not be null if `data_len` > 0
+/// - `data` may be null if `data_len` is 0
+/// - This function is thread-safe
+/// - Data is copied, so the buffer can be freed after this function returns
+///
+/// # Parameters
+/// - `publisher`: Pointer to the publisher
+/// - `data`: Pointer to the data buffer
+/// - `data_len`: Length of the data in bytes
+/// - `_delivery_mode`: Ignored (delivery mode is set at publisher creation)
+///
+/// # Returns
+/// `MoqResult` with status code and error message (if any)
 #[no_mangle]
 pub unsafe extern "C" fn moq_publish_data(
     publisher: *mut MoqPublisher,
@@ -739,29 +996,59 @@ pub unsafe extern "C" fn moq_publish_data(
     data_len: usize,
     _delivery_mode: MoqDeliveryMode,
 ) -> MoqResult {
-    if publisher.is_null() || data.is_null() {
-        set_last_error("Publisher or data is null".to_string());
+    std::panic::catch_unwind(|| {
+        moq_publish_data_impl(publisher, data, data_len, _delivery_mode)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_publish_data");
+        set_last_error("Internal panic occurred in moq_publish_data".to_string());
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred"
+        )
+    })
+}
+
+unsafe fn moq_publish_data_impl(
+    publisher: *mut MoqPublisher,
+    data: *const u8,
+    data_len: usize,
+    _delivery_mode: MoqDeliveryMode,
+) -> MoqResult {
+    if publisher.is_null() {
+        set_last_error("Publisher is null".to_string());
         return make_error_result(
             MoqResultCode::MoqErrorInvalidArgument,
-            "Publisher or data is null",
+            "Publisher is null",
+        );
+    }
+
+    // Validate data pointer with length check
+    if data.is_null() && data_len > 0 {
+        set_last_error("Data is null but data_len is non-zero".to_string());
+        return make_error_result(
+            MoqResultCode::MoqErrorInvalidArgument,
+            "Data is null but data_len is non-zero",
         );
     }
 
     let publisher_ref = &*publisher;
-    let mut inner = match publisher_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => {
-            set_last_error("Failed to lock publisher mutex".to_string());
-            return make_error_result(
-                MoqResultCode::MoqErrorInternal,
-                "Failed to lock publisher mutex",
-            );
+    let inner_result = publisher_ref.inner.lock();
+    let mut inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_publish_data, recovering");
+            poisoned.into_inner()
         }
     };
 
-    // Copy data to Bytes
-    let data_slice = std::slice::from_raw_parts(data, data_len);
-    let data_bytes = bytes::Bytes::copy_from_slice(data_slice);
+    // Copy data to Bytes (handle empty data case)
+    // Note: data_len == 0 case already validated above (null with non-zero length rejected)
+    let data_bytes = if data_len == 0 {
+        bytes::Bytes::new()
+    } else {
+        let data_slice = std::slice::from_raw_parts(data, data_len);
+        bytes::Bytes::copy_from_slice(data_slice)
+    };
 
     let namespace = inner.namespace.clone();
     let track_name = inner.track_name.clone();
@@ -822,8 +1109,47 @@ pub unsafe extern "C" fn moq_publish_data(
  * Subscribing
  * ─────────────────────────────────────────────── */
 
+/// Subscribes to a track on the MoQ relay server.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `namespace` must be a valid null-terminated C string pointer
+/// - `namespace` must not be null
+/// - `track_name` must be a valid null-terminated C string pointer
+/// - `track_name` must not be null
+/// - `data_callback` may be null (no data will be received)
+/// - `user_data` will be passed to the callback and may be null
+/// - Client must be connected
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to the MoQ client
+/// - `namespace`: Namespace string (slash-separated path)
+/// - `track_name`: Track name string
+/// - `data_callback`: Optional callback for received data
+/// - `user_data`: User data pointer passed to the callback
+///
+/// # Returns
+/// Pointer to the created subscriber, or null on failure
 #[no_mangle]
 pub unsafe extern "C" fn moq_subscribe(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    track_name: *const c_char,
+    data_callback: MoqDataCallback,
+    user_data: *mut std::ffi::c_void,
+) -> *mut MoqSubscriber {
+    std::panic::catch_unwind(|| {
+        moq_subscribe_impl(client, namespace, track_name, data_callback, user_data)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_subscribe");
+        set_last_error("Internal panic occurred in moq_subscribe".to_string());
+        std::ptr::null_mut()
+    })
+}
+
+unsafe fn moq_subscribe_impl(
     client: *mut MoqClient,
     namespace: *const c_char,
     track_name: *const c_char,
@@ -852,11 +1178,12 @@ pub unsafe extern "C" fn moq_subscribe(
     };
 
     let client_ref = &*client;
-    let mut inner = match client_ref.inner.lock() {
-        Ok(inner) => inner,
-        Err(_) => {
-            set_last_error("Failed to lock client mutex".to_string());
-            return std::ptr::null_mut();
+    let inner_result = client_ref.inner.lock();
+    let mut inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_subscribe, recovering");
+            poisoned.into_inner()
         }
     };
 
@@ -1058,14 +1385,20 @@ pub unsafe extern "C" fn moq_subscribe(
                         }
                     };
 
-                    // Invoke callback if we got data
+                    // Invoke callback if we got data (with panic protection)
                     if let Some(buffer) = data_result {
-                        if let Ok(inner) = inner_clone.lock() {
-                            if let Some(callback) = inner.data_callback {
-                                callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
+                        let inner_result = inner_clone.lock();
+                        let inner = match inner_result {
+                            Ok(guard) => guard,
+                            Err(poisoned) => {
+                                log::warn!("Mutex poisoned in subscriber callback, recovering");
+                                poisoned.into_inner()
                             }
-                        } else {
-                            log::error!("Failed to lock subscriber mutex for callback");
+                        };
+                        if let Some(callback) = inner.data_callback {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
+                            }));
                         }
                     }
                 }
@@ -1076,8 +1409,18 @@ pub unsafe extern "C" fn moq_subscribe(
         }
     });
 
-    // Store reader task
-    subscriber_inner.lock().unwrap().reader_task = Some(reader_task);
+    // Store reader task (with proper error handling)
+    {
+        let inner_result = subscriber_inner.lock();
+        let mut inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned when storing reader task, recovering");
+                poisoned.into_inner()
+            }
+        };
+        inner.reader_task = Some(reader_task);
+    } // Drop the guard before moving subscriber_inner
 
     let subscriber = MoqSubscriber {
         inner: subscriber_inner,
@@ -1087,45 +1430,91 @@ pub unsafe extern "C" fn moq_subscribe(
     Box::into_raw(Box::new(subscriber))
 }
 
+/// Destroys a subscriber and releases its resources.
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()`
+/// - `subscriber` must not be null (null pointers are safely ignored)
+/// - `subscriber` must not be accessed after this function returns
+/// - This function is thread-safe
+/// - Active reader task will be aborted
+///
+/// # Parameters
+/// - `subscriber`: Pointer to the subscriber to destroy, or null (null is safely ignored)
 #[no_mangle]
 pub unsafe extern "C" fn moq_subscriber_destroy(subscriber: *mut MoqSubscriber) {
-    if !subscriber.is_null() {
-        let subscriber = Box::from_raw(subscriber);
-        
-        // Cancel reader task
-        if let Ok(mut inner) = subscriber.inner.lock() {
+    let _ = std::panic::catch_unwind(|| {
+        if !subscriber.is_null() {
+            let subscriber = Box::from_raw(subscriber);
+            
+            // Cancel reader task (with proper error handling)
+            let inner_result = subscriber.inner.lock();
+            let mut inner = match inner_result {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::warn!("Mutex poisoned in moq_subscriber_destroy, recovering");
+                    poisoned.into_inner()
+                }
+            };
             if let Some(task) = inner.reader_task.take() {
                 task.abort();
             }
+            
+            log::debug!("Destroyed subscriber for {:?}/{}", inner.namespace, inner.track_name);
         }
-        
-        log::debug!("Destroyed subscriber");
-    }
+    });
+    // Silently handle panics - destructor should not propagate panics
 }
 
 /* ───────────────────────────────────────────────
  * Utilities
  * ─────────────────────────────────────────────── */
 
+/// Frees a string allocated by the FFI library.
+///
+/// # Safety
+/// - `s` must be a valid pointer returned by a moq_ffi function that requires freeing
+/// - `s` must not be null (null pointers are safely ignored)
+/// - `s` must not be accessed after this function returns
+/// - `s` must not be a static string (like those from moq_version or moq_last_error)
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `s`: Pointer to the string to free, or null (null is safely ignored)
+///
+/// # Note
+/// Only use this for strings in MoqResult.message fields where code != MOQ_OK.
+/// Do NOT use this for moq_version() or moq_last_error() return values.
 #[no_mangle]
 pub unsafe extern "C" fn moq_free_str(s: *const c_char) {
-    if !s.is_null() {
-        let _ = CString::from_raw(s as *mut c_char);
-    }
+    let _ = std::panic::catch_unwind(|| {
+        if !s.is_null() {
+            let _ = CString::from_raw(s as *mut c_char);
+        }
+    });
+    // Silently handle panics - free function should not propagate panics
 }
 
+/// Returns the version string of the library.
+///
+/// # Returns
+/// A pointer to a static null-terminated C string containing the version.
+/// This string must NOT be freed - it is a static string.
+///
+/// # Thread Safety
+/// This function is thread-safe.
 #[no_mangle]
 pub extern "C" fn moq_version() -> *const c_char {
     #[cfg(feature = "with_moq")]
     {
         const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 14)\0";
-        return VERSION.as_ptr() as *const c_char;
+        VERSION.as_ptr() as *const c_char
     }
     
     #[cfg(feature = "with_moq_draft07")]
     {
         const VERSION: &[u8] = b"moq_ffi 0.1.0 (IETF Draft 07)\0";
-        return VERSION.as_ptr() as *const c_char;
+        VERSION.as_ptr() as *const c_char
     }
     
     #[cfg(not(any(feature = "with_moq", feature = "with_moq_draft07")))]
@@ -1136,6 +1525,18 @@ pub extern "C" fn moq_version() -> *const c_char {
     }
 }
 
+/// Returns the last error message for this thread.
+///
+/// # Returns
+/// A pointer to a null-terminated C string containing the last error message,
+/// or null if no error has occurred. The string is valid until the next error
+/// occurs in this thread or the thread exits. The caller must NOT free this pointer.
+///
+/// # Thread Safety
+/// This function is thread-safe. Each thread has its own error storage.
+///
+/// # Note
+/// This pointer is thread-local and should NOT be freed with moq_free_str().
 #[no_mangle]
 pub extern "C" fn moq_last_error() -> *const c_char {
     // Note: This returns a pointer that is valid until the next error occurs
@@ -1145,7 +1546,7 @@ pub extern "C" fn moq_last_error() -> *const c_char {
         Some(err) => {
             // Create a static string that we'll reuse per thread
             thread_local! {
-                static ERROR_BUF: std::cell::RefCell<Option<CString>> = std::cell::RefCell::new(None);
+                static ERROR_BUF: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
             }
             
             ERROR_BUF.with(|buf| {

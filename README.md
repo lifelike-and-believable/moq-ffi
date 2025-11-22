@@ -1,5 +1,27 @@
 # MoQ FFI - C++ Wrapper for moq-rs (Media over QUIC)
 
+## ⚠️ Production Readiness Status
+
+**Status**: 🚧 **In Progress** - Critical safety fixes applied, additional improvements in progress
+
+This library has undergone comprehensive production readiness analysis. **Recent improvements include:**
+- ✅ All FFI functions now have panic protection
+- ✅ Comprehensive null pointer validation
+- ✅ Callback invocations protected from panic unwinding
+- ✅ Poisoned mutex handling with graceful recovery
+- ✅ Memory management improved in error paths
+- ✅ All clippy warnings resolved
+
+**Still recommended before production deployment:**
+- Add comprehensive unit test suite (>80% coverage)
+- Add integration tests
+- Add async operation timeouts
+- Memory leak testing with valgrind/AddressSanitizer
+
+See [PRODUCTION_READINESS_INDEX.md](PRODUCTION_READINESS_INDEX.md) for detailed analysis and improvement roadmap.
+
+---
+
 This repository provides:
 - A **Rust FFI library** that exposes a C ABI (`moq_ffi.h`) for the [moq-rs](https://github.com/cloudflare/moq-rs) `moq-transport` implementation
 - **Cross-platform build workflows** for Windows (Win64), Linux, and macOS
