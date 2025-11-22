@@ -1,0 +1,67 @@
+# Valgrind Suppressions for moq-ffi
+#
+# This file contains suppressions for known false positives in valgrind
+# when testing the moq-ffi library.
+
+# Suppress Rust runtime initialization allocations
+{
+   rust_runtime_init
+   Memcheck:Leak
+   ...
+   fun:__rust_*
+}
+
+# Suppress tokio runtime allocations
+{
+   tokio_runtime
+   Memcheck:Leak
+   ...
+   fun:*tokio*runtime*
+}
+
+# Suppress std::thread allocations
+{
+   std_thread
+   Memcheck:Leak
+   ...
+   fun:*std*thread*
+}
+
+# Suppress once_cell lazy static initialization
+{
+   once_cell_lazy
+   Memcheck:Leak
+   ...
+   fun:*once_cell*
+}
+
+# Suppress OpenSSL/rustls allocations (known to have false positives)
+{
+   openssl_init
+   Memcheck:Leak
+   ...
+   obj:*/libssl.so*
+}
+
+{
+   rustls_init
+   Memcheck:Leak
+   ...
+   fun:*rustls*
+}
+
+# Suppress quinn QUIC allocations (background tasks)
+{
+   quinn_runtime
+   Memcheck:Leak
+   ...
+   fun:*quinn*
+}
+
+# Suppress async runtime background tasks
+{
+   async_background
+   Memcheck:Leak
+   ...
+   fun:*async*
+}

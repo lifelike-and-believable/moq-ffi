@@ -29,6 +29,13 @@ ue/MoqSandbox/Content/*.uasset
 *.pdb
 *.exp
 
+# Memory leak testing artifacts
+valgrind-report.txt
+asan-report.*
+asan-build.log
+lsan-output.log
+appverifier-output.log
+
 # OS
 .DS_Store
 Thumbs.db

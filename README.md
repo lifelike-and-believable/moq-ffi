@@ -13,11 +13,13 @@ This library has undergone comprehensive production readiness analysis. **Recent
 - ✅ All clippy warnings resolved
 - ✅ **Comprehensive unit test suite (131 tests, 81% coverage)**
 
+**Recent improvements (2025-11-22):**
+- ✅ **Async operation timeouts** added to connect and subscribe operations
+- ✅ **Memory leak testing** infrastructure with valgrind/AddressSanitizer
+- ✅ **Test execution** integrated into CI workflow
+
 **Still recommended before production deployment:**
-- Add integration tests
-- Add async operation timeouts
-- Memory leak testing with valgrind/AddressSanitizer
-- Add test execution to CI workflow
+- Add integration tests with mock relay server
 
 See [PRODUCTION_READINESS_INDEX.md](PRODUCTION_READINESS_INDEX.md) for detailed analysis and improvement roadmap.
 
