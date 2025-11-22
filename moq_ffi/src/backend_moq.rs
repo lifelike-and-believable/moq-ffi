@@ -69,6 +69,22 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create tokio runtime")
 });
 
+// Initialize CryptoProvider for rustls (required for TLS connections)
+// This is initialized once globally before any TLS operations
+static CRYPTO_PROVIDER_INIT: Lazy<()> = Lazy::new(|| {
+    use rustls::crypto::CryptoProvider;
+    // Install default provider (aws-lc-rs) if not already installed
+    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
+        Ok(()) => {
+            log::debug!("CryptoProvider installed successfully");
+        }
+        Err(_) => {
+            // Already installed, this is fine
+            log::debug!("CryptoProvider already installed");
+        }
+    }
+});
+
 // Thread-local error storage
 thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -242,6 +258,9 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
 #[no_mangle]
 pub extern "C" fn moq_client_create() -> *mut MoqClient {
     std::panic::catch_unwind(|| {
+        // Ensure CryptoProvider is initialized before any TLS operations
+        Lazy::force(&CRYPTO_PROVIDER_INIT);
+        
         let client = MoqClient {
             inner: Arc::new(Mutex::new(ClientInner {
                 connected: false,
