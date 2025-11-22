@@ -17,9 +17,7 @@ This library has undergone comprehensive production readiness analysis. **Recent
 - ✅ **Async operation timeouts** added to connect and subscribe operations
 - ✅ **Memory leak testing** infrastructure with valgrind/AddressSanitizer
 - ✅ **Test execution** integrated into CI workflow
-
-**Still recommended before production deployment:**
-- Add integration tests with mock relay server
+- ✅ **Integration test suite** using Cloudflare relay network (7 end-to-end tests)
 
 See [PRODUCTION_READINESS_INDEX.md](PRODUCTION_READINESS_INDEX.md) for detailed analysis and improvement roadmap.
 
@@ -247,17 +245,44 @@ cp target/release/libmoq_ffi.* ../artifacts/lib/
 cp include/*.h ../artifacts/include/
 ```
 
-### Testing the Build
+### Testing
+
+#### Unit Tests
 
 ```bash
-# Test stub build (no dependencies)
 cd moq_ffi
-cargo build --release
+
+# Test stub build (no dependencies)
 cargo test
 
-# Test full build (with moq-transport)
-cargo build --release --features with_moq
+# Test full build with Draft 07 (CloudFlare production relay)
+cargo test --features with_moq_draft07
+
+# Test full build with Draft 14 (Latest specification)
+cargo test --features with_moq
 ```
+
+**Current Coverage**: 131 unit tests with 81% code coverage
+
+#### Integration Tests
+
+Integration tests validate end-to-end functionality against the Cloudflare production relay:
+
+```bash
+cd moq_ffi
+
+# Run all integration tests (requires network connectivity)
+cargo test --features with_moq_draft07 --test cloudflare_relay_integration -- --ignored --nocapture
+
+# Run specific integration test
+cargo test --features with_moq_draft07 test_connect_to_cloudflare_relay -- --ignored --nocapture
+```
+
+**Note**: Integration tests are marked with `#[ignore]` and must be explicitly run with the `--ignored` flag. They require:
+- Network connectivity to `relay.cloudflare.mediaoverquic.com`
+- The `with_moq_draft07` feature (Cloudflare uses IETF Draft 07)
+
+See [moq_ffi/tests/README.md](moq_ffi/tests/README.md) for detailed integration test documentation.
 
 ## 📝 API Reference
 
