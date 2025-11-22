@@ -134,11 +134,21 @@ MOQ_API void moq_client_destroy(MoqClient* client);
 
 /**
  * Connect to a MoQ relay server
+ * 
+ * Supported URL schemes:
+ * - https:// - WebTransport over QUIC (Draft 07 and Draft 14)
+ * 
+ * Future enhancements (Draft 14):
+ * - quic:// - Raw QUIC connection (planned)
+ * 
  * @param client Client handle
- * @param url WebTransport URL (e.g., "https://relay.example.com:443")
+ * @param url Connection URL (e.g., "https://relay.example.com:443")
  * @param connection_callback Optional callback for connection state changes
  * @param user_data User context pointer passed to callbacks
  * @return Result of the connection attempt
+ * 
+ * @note Draft 07 (CloudFlare): WebTransport only
+ * @note Draft 14 (Latest): WebTransport (raw QUIC planned for future release)
  */
 MOQ_API MoqResult moq_connect(
     MoqClient* client,

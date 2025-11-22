@@ -9,19 +9,48 @@ This repository provides:
 
 ### Building the FFI Library
 
-The library supports two build modes:
+The library supports multiple build modes:
 
-**1. Full Build (with MoQ Transport) - Recommended**
+**1. Full Build with IETF Draft 14 (Latest - Recommended)**
 ```bash
 cd moq_ffi
 cargo build --release --features with_moq
 ```
 
-**2. Stub Build (for testing build toolchain)**
+**2. Full Build with IETF Draft 07 (CloudFlare Production Relay)**
+```bash
+cd moq_ffi
+cargo build --release --features with_moq_draft07
+```
+
+**3. Stub Build (for testing build toolchain)**
 ```bash
 cd moq_ffi
 cargo build --release
 ```
+
+### MoQ Protocol Version Compatibility
+
+This library supports two versions of the MoQ Transport protocol:
+
+- **IETF Draft 07** (`with_moq_draft07` feature): **PRIMARY** - CloudFlare's production relay version
+- **IETF Draft 14** (`with_moq` feature): Latest specification, compatible with moq-transport 0.11 from crates.io
+
+**Important**: The two draft versions are **mutually exclusive** - choose one based on your relay server:
+- Use **Draft 07** for production deployment with CloudFlare's MoQ relay (recommended)
+- Use Draft 14 for testing with the latest moq-rs implementation
+
+#### Transport Protocol Support
+
+Current implementation (both drafts):
+- ✅ WebTransport over QUIC (https:// URLs)
+- ✅ QUIC datagrams enabled for low-latency delivery
+- ✅ Stream and datagram delivery modes
+
+Planned for Draft 14 (future PR):
+- ⏳ Raw QUIC connections (quic:// URLs) without WebTransport protocol layer
+- ⏳ Direct QUIC stream-based MoQ session establishment
+- ⏳ Custom ALPN for MoQ protocol identification
 
 **Build Artifacts (Windows MSVC):**
 - DLL: `target/release/moq_ffi.dll`
@@ -218,8 +247,19 @@ See [`moq_ffi/include/moq_ffi.h`](moq_ffi/include/moq_ffi.h) for the complete C 
 
 ### Delivery Modes
 
-- `MOQ_DELIVERY_DATAGRAM`: Lossy delivery for high-frequency updates (like real-time motion data)
-- `MOQ_DELIVERY_STREAM`: Reliable delivery for critical data
+The library supports two delivery modes for publishing data:
+
+- `MOQ_DELIVERY_DATAGRAM`: Lossy, low-latency delivery over QUIC datagrams
+  - Best for high-frequency updates (e.g., real-time motion data, audio samples)
+  - Lower overhead but may experience packet loss
+  - Specify when creating publisher: `moq_create_publisher_ex(client, namespace, track, MOQ_DELIVERY_DATAGRAM)`
+  
+- `MOQ_DELIVERY_STREAM`: Reliable, ordered delivery over QUIC streams
+  - Best for critical data that must arrive (e.g., video keyframes, metadata)
+  - Higher latency but guaranteed delivery
+  - Default mode when using `moq_create_publisher()`
+
+**Note**: The delivery mode is set when creating the publisher and applies to all data published through that publisher. WebTransport over QUIC provides both mechanisms seamlessly.
 
 ## 🚦 CI/CD Workflows
 

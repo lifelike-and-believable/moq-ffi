@@ -4,10 +4,17 @@
 // The implementation uses moq-transport types and follows MoQ protocol patterns.
 //
 // Features:
-// - Support for both IETF Draft 7 (CloudFlare production) and Draft 14 (latest)
-// - WebTransport and raw QUIC connection support
+// - Support for both IETF Draft 7 (CloudFlare production - PRIORITY) and Draft 14 (latest)
+// - WebTransport over QUIC connection support (both drafts)
 // - Stream and Datagram delivery modes
 // - Full async runtime integration with proper FFI safety
+//
+// TODO(Draft 14): Future enhancements for Draft 14 implementation
+// - Add raw QUIC connection support (without WebTransport protocol layer)
+// - Implement direct Session creation from quinn::Connection
+// - Add connection pooling and reuse capabilities
+// - Optimize for lower latency scenarios
+// - Add comprehensive integration tests with Draft 14 relay servers
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -271,7 +278,15 @@ pub unsafe extern "C" fn moq_connect(
     };
 
     // Validate URL format - must be HTTPS for WebTransport over QUIC
-    // Note: WebTransport uses QUIC as transport with HTTP/3 upgrade handshake
+    // Draft 07 (CloudFlare): WebTransport over QUIC only (current priority)
+    // Draft 14 (Latest): WebTransport over QUIC
+    // 
+    // TODO(Draft 14): Add support for raw QUIC connections (quic:// URLs)
+    // - Accept both https:// (WebTransport) and quic:// (raw QUIC) for Draft 14
+    // - Implement direct QUIC connection without HTTP/3 handshake
+    // - Use moq-transport Session::connect() with raw QUIC streams
+    // - Add ALPN negotiation for MoQ protocol identification
+    // - Reference: https://github.com/moq-wg/moq-transport
     if !url_str.starts_with("https://") {
         set_last_error(format!("Invalid URL scheme: {}", url_str));
         return make_error_result(
@@ -306,8 +321,16 @@ pub unsafe extern "C" fn moq_connect(
     };
 
     // Establish WebTransport connection over QUIC asynchronously
-    // NOTE: This requires an actual MoQ relay server to be running at the URL.
-    // WebTransport uses QUIC as the underlying transport with HTTP/3 upgrade.
+    // Priority: Draft 07 (CloudFlare production relay)
+    // Both Draft 07 and Draft 14 use WebTransport over QUIC
+    //
+    // TODO(Draft 14): Implement connection type detection and routing
+    // When Draft 14 raw QUIC support is added:
+    // 1. Check URL scheme (https:// vs quic://)
+    // 2. Route to appropriate connection method:
+    //    - https:// -> WebTransport (current implementation)
+    //    - quic:// -> Raw QUIC (to be implemented)
+    // 3. Both should result in a compatible session for moq-transport
     let client_inner = client_ref.inner.clone();
     let url_str_clone = url_str.clone();
     let result = RUNTIME.block_on(async move {
@@ -353,7 +376,12 @@ pub unsafe extern "C" fn moq_connect(
         endpoint.set_default_client_config(client_config);
 
         // Connect via WebTransport (HTTP/3 over QUIC)
-        log::info!("Connecting via WebTransport over QUIC to {}", url_str_clone);
+        #[cfg(feature = "with_moq_draft07")]
+        log::info!("Connecting via WebTransport over QUIC to {} (Draft 07 - CloudFlare)", url_str_clone);
+        
+        #[cfg(feature = "with_moq")]
+        log::info!("Connecting via WebTransport over QUIC to {} (Draft 14 - Latest)", url_str_clone);
+        
         use web_transport_quinn::connect as wt_connect;
         let wt_session_quinn = wt_connect(&endpoint, &parsed_url)
             .await
