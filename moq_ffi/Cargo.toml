@@ -69,7 +69,7 @@ futures = { version = "0.3", optional = true }
 url = { version = "2.5", optional = true }
 bytes = { version = "1.11", optional = true }
 quinn = { version = "0.11", optional = true }
-rustls = { version = "0.23", optional = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 
 # Logging
