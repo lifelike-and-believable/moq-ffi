@@ -302,13 +302,25 @@ pub unsafe extern "C" fn moq_connect(
     let result = RUNTIME.block_on(async move {
         // Create quinn endpoint for WebTransport
         // Using default client configuration with native certificates
-        let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())
+        let bind_addr = "[::]:0".parse()
+            .map_err(|e| format!("Failed to parse bind address: {}", e))?;
+        let mut endpoint = quinn::Endpoint::client(bind_addr)
             .map_err(|e| format!("Failed to create endpoint: {}", e))?;
 
         // Configure TLS with native root certificates  
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
-            roots.add(cert).ok();
+        let native_certs = rustls_native_certs::load_native_certs();
+        
+        // Log any errors that occurred while loading certificates
+        for err in native_certs.errors {
+            log::warn!("Failed to load native cert: {:?}", err);
+        }
+        
+        // Add valid certificates to the store
+        for cert in native_certs.certs {
+            if let Err(e) = roots.add(cert) {
+                log::warn!("Failed to add root cert: {:?}", e);
+            }
         }
 
         let client_crypto = rustls::ClientConfig::builder()
@@ -344,7 +356,8 @@ pub unsafe extern "C" fn moq_connect(
         log::info!("MoQ session established");
 
         // Store session and publisher/subscriber
-        let mut inner = client_inner.lock().unwrap();
+        let mut inner = client_inner.lock()
+            .map_err(|e| format!("Failed to lock client mutex: {}", e))?;
         inner.publisher = Some(publisher);
         inner.subscriber = Some(subscriber);
         inner.connected = true;
@@ -817,8 +830,13 @@ pub unsafe extern "C" fn moq_subscribe(
     let inner_clone = subscriber_inner.clone();
     let reader_task = RUNTIME.spawn(async move {
         let track = {
-            let inner = inner_clone.lock().unwrap();
-            inner.track.clone()
+            match inner_clone.lock() {
+                Ok(inner) => inner.track.clone(),
+                Err(e) => {
+                    log::error!("Failed to lock subscriber mutex: {}", e);
+                    return;
+                }
+            }
         };
 
         // Get the mode once (it's set when track is established)
@@ -921,9 +939,12 @@ pub unsafe extern "C" fn moq_subscribe(
 
                     // Invoke callback if we got data
                     if let Some(buffer) = data_result {
-                        let inner = inner_clone.lock().unwrap();
-                        if let Some(callback) = inner.data_callback {
-                            callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
+                        if let Ok(inner) = inner_clone.lock() {
+                            if let Some(callback) = inner.data_callback {
+                                callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
+                            }
+                        } else {
+                            log::error!("Failed to lock subscriber mutex for callback");
                         }
                     }
                 }
