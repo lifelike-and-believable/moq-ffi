@@ -174,16 +174,32 @@ MOQ_API bool moq_is_connected(const MoqClient* client);
 MOQ_API MoqResult moq_announce_namespace(MoqClient* client, const char* namespace_str);
 
 /**
- * Create a publisher for a specific track
+ * Create a publisher for a specific track (defaults to stream mode)
  * @param client Client handle
  * @param namespace_str Namespace of the track
  * @param track_name Name of the track
  * @return Handle to the publisher or NULL on failure
+ * @deprecated Use moq_create_publisher_ex() to specify delivery mode
  */
 MOQ_API MoqPublisher* moq_create_publisher(
     MoqClient* client,
     const char* namespace_str,
     const char* track_name
+);
+
+/**
+ * Create a publisher for a specific track with explicit delivery mode
+ * @param client Client handle
+ * @param namespace_str Namespace of the track
+ * @param track_name Name of the track
+ * @param delivery_mode Delivery mode (datagram or stream)
+ * @return Handle to the publisher or NULL on failure
+ */
+MOQ_API MoqPublisher* moq_create_publisher_ex(
+    MoqClient* client,
+    const char* namespace_str,
+    const char* track_name,
+    MoqDeliveryMode delivery_mode
 );
 
 /**

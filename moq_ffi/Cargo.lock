@@ -495,6 +495,20 @@ dependencies = [
 
 [[package]]
 name = "moq-transport"
+version = "0.10.0"
+source = "git+https://github.com/cloudflare/moq-rs.git?branch=draft-ietf-moq-transport-07#ebc843de8504e37d36c3134a1181513ebdf7a34a"
+dependencies = [
+ "bytes",
+ "futures",
+ "log",
+ "paste",
+ "thiserror 1.0.69",
+ "tokio",
+ "web-transport",
+]
+
+[[package]]
+name = "moq-transport"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "109d252588e763efce546f43ab92fa56385f2dfbdb32bd770f5d1cec699eca64"
@@ -516,7 +530,8 @@ dependencies = [
  "bytes",
  "futures",
  "log",
- "moq-transport",
+ "moq-transport 0.10.0",
+ "moq-transport 0.11.0",
  "once_cell",
  "quinn",
  "rustls",
