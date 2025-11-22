@@ -21,7 +21,8 @@ with_moq = [
     "dep:tokio",
     "dep:anyhow",
     "dep:once_cell",
-    "dep:futures"
+    "dep:futures",
+    "dep:url"
 ]
 
 # ───────────────────────────────────────────────
@@ -37,6 +38,7 @@ tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time"], op
 once_cell = { version = "1.19", optional = true }
 anyhow = { version = "1.0", optional = true }
 futures = { version = "0.3", optional = true }
+url = { version = "2.5", optional = true }
 
 # Logging
 log = "0.4"

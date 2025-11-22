@@ -519,6 +519,7 @@ dependencies = [
  "moq-transport",
  "once_cell",
  "tokio",
+ "url",
  "web-transport 0.8.2",
 ]
 
