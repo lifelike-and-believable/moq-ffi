@@ -121,16 +121,15 @@ typedef void (*MoqTrackCallback)(void* user_data, const char* namespace_str, con
  * ─────────────────────────────────────────────── */
 
 /**
- * Initialize the MoQ FFI library
- * 
- * Initializes the Rustls crypto provider required for TLS/QUIC connections.
- * This function is safe to call multiple times - subsequent calls are no-ops.
- * 
- * NOTE: This function is called automatically on the first use of any connection
- * functions (e.g., moq_connect()), so explicit initialization is optional but
- * recommended for better error handling and faster first connection.
- * 
- * @return Result with MOQ_OK on success, or error code on failure
+ * Initialize the MoQ FFI crypto provider
+ *
+ * Must be called during module initialization before any TLS operations.
+ * Safe to call multiple times - subsequent calls are no-ops.
+ *
+ * This ensures the rustls crypto provider is installed in the process
+ * before any TLS connections are attempted.
+ *
+ * @return true on success (always succeeds)
  * 
  * @note Thread-safe: can be called from any thread
  * @note Idempotent: safe to call multiple times
@@ -138,19 +137,15 @@ typedef void (*MoqTrackCallback)(void* user_data, const char* namespace_str, con
  * 
  * Example usage:
  * @code
- *   // Optional: Initialize explicitly at startup
- *   MoqResult result = moq_init();
- *   if (result.code != MOQ_OK) {
- *       printf("Failed to initialize: %s\n", result.message);
- *       moq_free_str(result.message);
- *       return -1;
- *   }
+ *   // C++: Call immediately after DLL load / module initialization
+ *   moq_init();
  *   
+ *   // ... then later ...
  *   // Now safe to create clients and connect
  *   MoqClient* client = moq_client_create();
  * @endcode
  */
-MOQ_API MoqResult moq_init(void);
+MOQ_API bool moq_init(void);
 
 /* ───────────────────────────────────────────────
  * Client Management

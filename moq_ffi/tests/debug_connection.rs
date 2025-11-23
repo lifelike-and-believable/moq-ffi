@@ -53,8 +53,7 @@ fn test_debug_cloudflare_connection() {
     
     // Step 1: Initialize MoQ FFI library
     println!("Step 1: Initialize MoQ FFI library with moq_init()");
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     println!("✓ moq_init() succeeded");
     
     // Step 2: Create client
@@ -137,8 +136,7 @@ fn test_debug_invalid_url() {
     println!("DEBUG: Testing with invalid URL");
     println!("═══════════════════════════════════════\n");
     
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -183,8 +181,7 @@ fn test_debug_unreachable_host() {
     println!("DEBUG: Testing with unreachable host");
     println!("═══════════════════════════════════════\n");
     
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());

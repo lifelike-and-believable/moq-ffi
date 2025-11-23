@@ -239,6 +239,21 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
     }
 }
 
+/// Internal helper to initialize crypto provider.
+/// This matches the working local fix implementation.
+fn init_crypto_provider() {
+    match rustls::crypto::CryptoProvider::install_default(
+        rustls::crypto::aws_lc_rs::default_provider()
+    ) {
+        Ok(_) => {
+            log::info!("rustls crypto provider installed successfully");
+        }
+        Err(_) => {
+            log::debug!("rustls crypto provider already installed (safe to ignore)");
+        }
+    }
+}
+
 /// Internal helper to ensure crypto provider is initialized.
 /// This is called automatically before any operations that require TLS/QUIC.
 fn ensure_crypto_init() {
@@ -250,49 +265,33 @@ fn ensure_crypto_init() {
  * Initialization
  * ─────────────────────────────────────────────── */
 
-/// Initialize the MoQ FFI library.
+/// Initialize the MoQ FFI crypto provider.
 ///
-/// This function initializes the Rustls crypto provider required for TLS/QUIC connections.
-/// It is safe to call this function multiple times - subsequent calls are no-ops.
-/// 
-/// **Note**: This function is called automatically on the first use of any connection
-/// functions (e.g., `moq_connect()`), so explicit initialization is optional but recommended
-/// for better error handling and faster first connection.
+/// Must be called during module initialization before any TLS operations.
+/// Safe to call multiple times - subsequent calls are no-ops.
+///
+/// This ensures the rustls crypto provider is installed in the process
+/// before any TLS connections are attempted.
 ///
 /// # Returns
-/// - `MOQ_OK` if initialization succeeds or was already completed
-/// - Error code if initialization fails (should not happen in normal operation)
+/// - `true` on success (always succeeds)
 ///
 /// # Thread Safety
 /// This function is thread-safe and can be called from any thread.
 ///
 /// # Example
 /// ```c
-/// // Optional: Initialize explicitly at startup
-/// MoqResult result = moq_init();
-/// if (result.code != MOQ_OK) {
-///     fprintf(stderr, "Failed to initialize MoQ: %s\n", result.message);
-///     moq_free_str(result.message);
-///     return -1;
-/// }
+/// // Call immediately after DLL load / module initialization
+/// moq_init();
 ///
+/// // ... then later ...
 /// // Now safe to create clients and connect
 /// MoqClient* client = moq_client_create();
 /// ```
 #[no_mangle]
-pub extern "C" fn moq_init() -> MoqResult {
-    std::panic::catch_unwind(|| {
-        ensure_crypto_init();
-        make_ok_result()
-    })
-    .unwrap_or_else(|_| {
-        log::error!("Panic in moq_init");
-        set_last_error("Internal panic occurred in moq_init".to_string());
-        make_error_result(
-            MoqResultCode::MoqErrorInternal,
-            "Failed to initialize MoQ library",
-        )
-    })
+pub extern "C" fn moq_init() -> bool {
+    init_crypto_provider();
+    true
 }
 
 /* ───────────────────────────────────────────────
@@ -1786,8 +1785,7 @@ mod tests {
         fn test_moq_init_succeeds() {
             // Test that moq_init() can be called successfully
             let result = moq_init();
-            assert_eq!(result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
-            assert!(result.message.is_null(), "Success should have no message");
+            assert!(result, "moq_init() should succeed");
         }
 
         #[test]
@@ -1795,8 +1793,7 @@ mod tests {
             // Test that calling moq_init() multiple times is safe
             for _ in 0..5 {
                 let result = moq_init();
-                assert_eq!(result.code, MoqResultCode::MoqOk, "moq_init() should succeed on repeated calls");
-                assert!(result.message.is_null(), "Success should have no message");
+                assert!(result, "moq_init() should succeed on repeated calls");
             }
         }
 
@@ -1804,7 +1801,7 @@ mod tests {
         fn test_moq_init_before_client_create() {
             // Test the recommended usage pattern: init before creating clients
             let init_result = moq_init();
-            assert_eq!(init_result.code, MoqResultCode::MoqOk);
+            assert!(init_result, "moq_init() should return true");
             
             let client = moq_client_create();
             assert!(!client.is_null(), "Client should be created after init");

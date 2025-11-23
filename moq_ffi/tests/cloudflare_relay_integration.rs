@@ -133,8 +133,7 @@ fn test_connect_to_cloudflare_relay() {
     println!("\n=== Test: Connect to Cloudflare Relay ===");
     
     // Test the recommended usage pattern: initialize FFI before creating clients
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     println!("moq_init() succeeded");
     
     // Create client
@@ -213,8 +212,7 @@ fn test_connection_lifecycle() {
     println!("\n=== Test: Connection Lifecycle ===");
     
     // Test the recommended usage pattern: initialize FFI before creating clients
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -292,8 +290,7 @@ fn test_full_publish_workflow() {
     println!("\n=== Test: Full Publish Workflow ===");
     
     // Test the recommended usage pattern: initialize FFI before creating clients
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -399,8 +396,7 @@ fn test_multiple_clients() {
     println!("\n=== Test: Multiple Clients ===");
     
     // Test the recommended usage pattern: initialize FFI before creating clients
-    let init_result = moq_init();
-    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    assert!(moq_init(), "moq_init() should succeed");
     
     // Create two clients
     let client1 = moq_client_create();

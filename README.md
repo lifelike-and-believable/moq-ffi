@@ -154,13 +154,12 @@ void on_data_received(void* user_data, const uint8_t* data, size_t data_len) {
 }
 
 int main() {
-    // Optional: Initialize the library explicitly (recommended)
+    // Initialize the library (recommended - call during module initialization)
     // This initializes the crypto provider for TLS/QUIC connections
-    // If not called, initialization happens automatically on first connection
-    MoqResult init_result = moq_init();
-    if (init_result.code != MOQ_OK) {
-        printf("Failed to initialize: %s\n", init_result.message);
-        moq_free_str(init_result.message);
+    // Must be called before any TLS operations
+    // Safe to call multiple times - subsequent calls are no-ops
+    if (!moq_init()) {
+        fprintf(stderr, "Failed to initialize MoQ FFI\n");
         return -1;
     }
     
