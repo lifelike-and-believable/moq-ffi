@@ -239,25 +239,13 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
     }
 }
 
-/// Internal helper to initialize crypto provider.
-/// This matches the working local fix implementation.
-fn init_crypto_provider() {
-    match rustls::crypto::CryptoProvider::install_default(
-        rustls::crypto::aws_lc_rs::default_provider()
-    ) {
-        Ok(_) => {
-            log::info!("rustls crypto provider installed successfully");
-        }
-        Err(_) => {
-            log::debug!("rustls crypto provider already installed (safe to ignore)");
-        }
-    }
-}
-
 /// Internal helper to ensure crypto provider is initialized.
-/// This is called automatically before any operations that require TLS/QUIC.
+/// This is called automatically before any operations that require TLS/QUIC,
+/// and can be explicitly called via the moq_init() FFI function.
+/// Uses the CRYPTO_INIT Lazy static to ensure thread-safe, one-time initialization.
 fn ensure_crypto_init() {
     // Access the CRYPTO_INIT Lazy static to trigger initialization
+    // The actual initialization logic is in the Lazy::new() closure above
     let _ = *CRYPTO_INIT;
 }
 
@@ -290,7 +278,7 @@ fn ensure_crypto_init() {
 /// ```
 #[no_mangle]
 pub extern "C" fn moq_init() -> bool {
-    init_crypto_provider();
+    ensure_crypto_init();
     true
 }
 
