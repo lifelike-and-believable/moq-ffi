@@ -105,6 +105,24 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
 }
 
 /* ───────────────────────────────────────────────
+ * Initialization
+ * ─────────────────────────────────────────────── */
+
+/// Initialize the MoQ FFI crypto provider (stub implementation - always succeeds).
+///
+/// In the stub backend, this is a no-op since there's no actual crypto initialization needed.
+///
+/// # Returns
+/// Always returns `true`
+///
+/// # Thread Safety
+/// This function is thread-safe and can be called from any thread.
+#[no_mangle]
+pub extern "C" fn moq_init() -> bool {
+    true
+}
+
+/* ───────────────────────────────────────────────
  * Client Management
  * ─────────────────────────────────────────────── */
 
@@ -478,6 +496,34 @@ mod tests {
         fn test_subscriber_destroy_with_null_is_safe() {
             // Should not crash even though stub never creates subscribers
             unsafe { moq_subscriber_destroy(std::ptr::null_mut()); }
+        }
+
+        #[test]
+        fn test_moq_init_succeeds() {
+            // Test that moq_init() can be called successfully (stub always succeeds)
+            let result = moq_init();
+            assert!(result, "moq_init() should succeed in stub");
+        }
+
+        #[test]
+        fn test_moq_init_is_idempotent() {
+            // Test that calling moq_init() multiple times is safe in stub
+            for _ in 0..5 {
+                let result = moq_init();
+                assert!(result, "moq_init() should succeed on repeated calls");
+            }
+        }
+
+        #[test]
+        fn test_moq_init_before_client_create() {
+            // Test the recommended usage pattern: init before creating clients
+            let init_result = moq_init();
+            assert!(init_result, "moq_init() should return true");
+            
+            let client = moq_client_create();
+            assert!(!client.is_null(), "Client should be created after init");
+            
+            unsafe { moq_client_destroy(client); }
         }
     }
 

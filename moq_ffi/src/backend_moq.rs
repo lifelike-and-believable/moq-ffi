@@ -63,6 +63,25 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create tokio runtime")
 });
 
+// Crypto provider initialization for rustls
+// Rustls 0.23+ requires explicit CryptoProvider initialization before any TLS operations.
+// This MUST be initialized before any WebTransport/QUIC connections are established.
+// We use Lazy to ensure it's initialized exactly once in a thread-safe manner.
+static CRYPTO_INIT: Lazy<bool> = Lazy::new(|| {
+    use rustls::crypto::CryptoProvider;
+    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
+        Ok(()) => {
+            log::info!("Rustls CryptoProvider (aws-lc-rs) initialized successfully");
+            true
+        }
+        Err(_) => {
+            // Already installed by another caller (e.g., integration tests)
+            log::debug!("Rustls CryptoProvider already installed");
+            true
+        }
+    }
+});
+
 // Thread-local error storage
 thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -220,6 +239,49 @@ fn make_error_result(code: MoqResultCode, message: &str) -> MoqResult {
     }
 }
 
+/// Internal helper to ensure crypto provider is initialized.
+/// This is called automatically before any operations that require TLS/QUIC,
+/// and can be explicitly called via the moq_init() FFI function.
+/// Uses the CRYPTO_INIT Lazy static to ensure thread-safe, one-time initialization.
+fn ensure_crypto_init() {
+    // Access the CRYPTO_INIT Lazy static to trigger initialization
+    // The actual initialization logic is in the Lazy::new() closure above
+    let _ = *CRYPTO_INIT;
+}
+
+/* ───────────────────────────────────────────────
+ * Initialization
+ * ─────────────────────────────────────────────── */
+
+/// Initialize the MoQ FFI crypto provider.
+///
+/// Must be called during module initialization before any TLS operations.
+/// Safe to call multiple times - subsequent calls are no-ops.
+///
+/// This ensures the rustls crypto provider is installed in the process
+/// before any TLS connections are attempted.
+///
+/// # Returns
+/// - `true` on success (always succeeds)
+///
+/// # Thread Safety
+/// This function is thread-safe and can be called from any thread.
+///
+/// # Example
+/// ```c
+/// // Call immediately after DLL load / module initialization
+/// moq_init();
+///
+/// // ... then later ...
+/// // Now safe to create clients and connect
+/// MoqClient* client = moq_client_create();
+/// ```
+#[no_mangle]
+pub extern "C" fn moq_init() -> bool {
+    ensure_crypto_init();
+    true
+}
+
 /* ───────────────────────────────────────────────
  * Client Management
  * ─────────────────────────────────────────────── */
@@ -338,6 +400,9 @@ unsafe fn moq_connect_impl(
     connection_callback: MoqConnectionCallback,
     user_data: *mut std::ffi::c_void,
 ) -> MoqResult {
+    // Ensure crypto provider is initialized before any TLS/QUIC operations
+    ensure_crypto_init();
+    
     if client.is_null() || url.is_null() {
         set_last_error("Client or URL is null".to_string());
         return make_error_result(
@@ -1702,6 +1767,62 @@ mod tests {
         fn test_runtime_initialization() {
             // Test that RUNTIME can be accessed without panicking
             let _ = &*RUNTIME;
+        }
+
+        #[test]
+        fn test_moq_init_succeeds() {
+            // Test that moq_init() can be called successfully
+            let result = moq_init();
+            assert!(result, "moq_init() should succeed");
+        }
+
+        #[test]
+        fn test_moq_init_is_idempotent() {
+            // Test that calling moq_init() multiple times is safe
+            for _ in 0..5 {
+                let result = moq_init();
+                assert!(result, "moq_init() should succeed on repeated calls");
+            }
+        }
+
+        #[test]
+        fn test_moq_init_before_client_create() {
+            // Test the recommended usage pattern: init before creating clients
+            let init_result = moq_init();
+            assert!(init_result, "moq_init() should return true");
+            
+            let client = moq_client_create();
+            assert!(!client.is_null(), "Client should be created after init");
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_client_create_without_explicit_init() {
+            // Test that client creation works without explicitly calling moq_init()
+            // (it should auto-initialize on first connection)
+            let client = moq_client_create();
+            assert!(!client.is_null(), "Client should be created even without explicit init");
+            
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_crypto_provider_initialized_on_connect() {
+            // Test that crypto provider is initialized when connecting
+            // This ensures automatic initialization works
+            let client = moq_client_create();
+            assert!(!client.is_null());
+            
+            let url = std::ffi::CString::new("https://example.com:443").unwrap();
+            let _result = unsafe {
+                moq_connect(client, url.as_ptr(), None, std::ptr::null_mut())
+            };
+            
+            // Even though connection will fail (invalid URL), crypto provider should be initialized
+            // No panic should occur
+            
+            unsafe { moq_client_destroy(client); }
         }
     }
 

@@ -24,24 +24,6 @@ use std::time::Duration;
 // Integration tests run as external crates and import via the library name
 use moq_ffi::*;
 
-// Initialize CryptoProvider for rustls (required for TLS connections)
-// This must be called before any TLS operations
-#[cfg(test)]
-fn init_crypto_provider() {
-    use rustls::crypto::CryptoProvider;
-    // Install default provider (aws-lc-rs) if not already installed
-    // Returns Ok(()) if installed successfully, Err if already installed
-    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
-        Ok(()) => {
-            println!("CryptoProvider installed successfully");
-        }
-        Err(_) => {
-            // Already installed, this is fine
-            println!("CryptoProvider already installed");
-        }
-    }
-}
-
 // Cloudflare relay URL (production)
 const CLOUDFLARE_RELAY_URL: &str = "https://relay.cloudflare.mediaoverquic.com";
 
@@ -150,8 +132,9 @@ where
 fn test_connect_to_cloudflare_relay() {
     println!("\n=== Test: Connect to Cloudflare Relay ===");
     
-    // Initialize CryptoProvider before any TLS operations
-    init_crypto_provider();
+    // Test the recommended usage pattern: initialize FFI before creating clients
+    assert!(moq_init(), "moq_init() should succeed");
+    println!("moq_init() succeeded");
     
     // Create client
     let client = moq_client_create();
@@ -228,8 +211,8 @@ fn test_connect_to_cloudflare_relay() {
 fn test_connection_lifecycle() {
     println!("\n=== Test: Connection Lifecycle ===");
     
-    // Initialize CryptoProvider before any TLS operations
-    init_crypto_provider();
+    // Test the recommended usage pattern: initialize FFI before creating clients
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -306,8 +289,8 @@ fn test_announce_namespace_requires_connection() {
 fn test_full_publish_workflow() {
     println!("\n=== Test: Full Publish Workflow ===");
     
-    // Initialize CryptoProvider before any TLS operations
-    init_crypto_provider();
+    // Test the recommended usage pattern: initialize FFI before creating clients
+    assert!(moq_init(), "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -412,8 +395,8 @@ fn test_full_publish_workflow() {
 fn test_multiple_clients() {
     println!("\n=== Test: Multiple Clients ===");
     
-    // Initialize CryptoProvider before any TLS operations
-    init_crypto_provider();
+    // Test the recommended usage pattern: initialize FFI before creating clients
+    assert!(moq_init(), "moq_init() should succeed");
     
     // Create two clients
     let client1 = moq_client_create();
