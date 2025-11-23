@@ -418,7 +418,7 @@ let wt_session = web_transport::Session::from(wt_session_quinn);
 - Uses `web_transport_quinn::connect()` to establish WebTransport session
 - Converts to generic `web_transport::Session` for moq-transport
 
-#### ⚠️ GAP: IPv6/IPv4 Fallback Not in moq-rs
+#### ⚠️ ENHANCEMENT: IPv6/IPv4 Fallback (Not in moq-rs)
 
 **Our implementation (backend_moq.rs:438-464):**
 ```rust
@@ -789,16 +789,23 @@ let versions: setup::Versions = [setup::Version::DRAFT_07].into();
 **Our implementation:**
 - Relies on moq-transport's default version negotiation
 - No explicit control over which draft version to advertise
+- Build feature flags (`with_moq` vs `with_moq_draft07`) select the version implicitly
+
+**Current Behavior:**
+- Draft 07 build: moq-transport uses `DRAFT_07` constant automatically
+- Draft 14 build: moq-transport uses `DRAFT_14` (or latest) constant automatically
+- Integration tests with Cloudflare relay confirm Draft 07 negotiation works correctly
 
 **Impact:** 🟡 **MEDIUM**
 - Works correctly as long as relay supports the version
 - Could cause confusion if version mismatch occurs
-- Error messages might not be clear about version incompatibility
+- Error messages from `Session::connect()` indicate version issues but don't specify which versions
+- Example error: "Version mismatch: client supports [DRAFT_14], server supports [DRAFT_07]"
 
 **Recommendation:**
-- **DOCUMENT**: Which draft version is supported by each build
-- **IMPROVE ERROR**: Detect version mismatch errors and provide clear message
-- **FUTURE**: Add FFI API to query negotiated version
+- **DOCUMENT**: Which draft version is supported by each build (already done in README)
+- **IMPROVE ERROR**: Detect version mismatch errors and provide clear FFI error message
+- **FUTURE**: Add FFI API to query negotiated version for diagnostics
 
 ## Best Practices Followed
 
@@ -941,6 +948,6 @@ The implementation correctly uses moq-rs APIs. Future moq-rs updates are unlikel
 
 ---
 
-**Analysis Date:** 2025-11-23  
+**Analysis Date:** 2024-01-23  
 **moq-rs Commit:** ebc843de8504e37d36c3134a1181513ebdf7a34a  
 **Analyzer:** GitHub Copilot Code Review Agent
