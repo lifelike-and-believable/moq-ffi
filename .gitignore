@@ -29,6 +29,10 @@ ue/MoqSandbox/Content/*.uasset
 *.pdb
 *.exp
 
+# Example binaries and scripts
+examples/test_client
+examples/*.sh
+
 # Memory leak testing artifacts
 valgrind-report.txt
 asan-report.*
