@@ -1,0 +1,4 @@
+[submodule "External/moq-rs"]
+	path = External/moq-rs
+	url = https://github.com/cloudflare/moq-rs.git
+	branch = draft-ietf-moq-transport-07
