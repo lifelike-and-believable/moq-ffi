@@ -11,19 +11,6 @@ use std::thread;
 
 use moq_ffi::*;
 
-// Initialize CryptoProvider for rustls (required for TLS connections)
-fn init_crypto_provider() {
-    use rustls::crypto::CryptoProvider;
-    match CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider()) {
-        Ok(()) => {
-            println!("✓ CryptoProvider installed successfully");
-        }
-        Err(_) => {
-            println!("✓ CryptoProvider already installed");
-        }
-    }
-}
-
 /// Helper struct to track connection state changes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConnectionStateTracker {
@@ -64,9 +51,11 @@ fn test_debug_cloudflare_connection() {
     println!("DEBUG: Testing connection to Cloudflare");
     println!("═══════════════════════════════════════\n");
     
-    // Step 1: Initialize crypto provider
-    println!("Step 1: Initialize CryptoProvider");
-    init_crypto_provider();
+    // Step 1: Initialize MoQ FFI library
+    println!("Step 1: Initialize MoQ FFI library with moq_init()");
+    let init_result = moq_init();
+    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
+    println!("✓ moq_init() succeeded");
     
     // Step 2: Create client
     println!("\nStep 2: Create MoQ client");
@@ -148,7 +137,8 @@ fn test_debug_invalid_url() {
     println!("DEBUG: Testing with invalid URL");
     println!("═══════════════════════════════════════\n");
     
-    init_crypto_provider();
+    let init_result = moq_init();
+    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());
@@ -193,7 +183,8 @@ fn test_debug_unreachable_host() {
     println!("DEBUG: Testing with unreachable host");
     println!("═══════════════════════════════════════\n");
     
-    init_crypto_provider();
+    let init_result = moq_init();
+    assert_eq!(init_result.code, MoqResultCode::MoqOk, "moq_init() should succeed");
     
     let client = moq_client_create();
     assert!(!client.is_null());

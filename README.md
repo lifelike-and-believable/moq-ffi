@@ -154,6 +154,16 @@ void on_data_received(void* user_data, const uint8_t* data, size_t data_len) {
 }
 
 int main() {
+    // Optional: Initialize the library explicitly (recommended)
+    // This initializes the crypto provider for TLS/QUIC connections
+    // If not called, initialization happens automatically on first connection
+    MoqResult init_result = moq_init();
+    if (init_result.code != MOQ_OK) {
+        printf("Failed to initialize: %s\n", init_result.message);
+        moq_free_str(init_result.message);
+        return -1;
+    }
+    
     // Create client
     MoqClient* client = moq_client_create();
     
@@ -290,6 +300,7 @@ See [`moq_ffi/include/moq_ffi.h`](moq_ffi/include/moq_ffi.h) for the complete C 
 
 ### Core Functions
 
+- **Initialization**: `moq_init()` - Optional explicit initialization (recommended)
 - **Client Management**: `moq_client_create()`, `moq_client_destroy()`, `moq_connect()`, `moq_disconnect()`
 - **Publishing**: `moq_announce_namespace()`, `moq_create_publisher()`, `moq_publish_data()`
 - **Subscribing**: `moq_subscribe()`, `moq_subscriber_destroy()`

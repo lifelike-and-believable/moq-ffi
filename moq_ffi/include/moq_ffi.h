@@ -117,6 +117,42 @@ typedef void (*MoqDataCallback)(void* user_data, const uint8_t* data, size_t dat
 typedef void (*MoqTrackCallback)(void* user_data, const char* namespace_str, const char* track_name);
 
 /* ───────────────────────────────────────────────
+ * Initialization
+ * ─────────────────────────────────────────────── */
+
+/**
+ * Initialize the MoQ FFI library
+ * 
+ * Initializes the Rustls crypto provider required for TLS/QUIC connections.
+ * This function is safe to call multiple times - subsequent calls are no-ops.
+ * 
+ * NOTE: This function is called automatically on the first use of any connection
+ * functions (e.g., moq_connect()), so explicit initialization is optional but
+ * recommended for better error handling and faster first connection.
+ * 
+ * @return Result with MOQ_OK on success, or error code on failure
+ * 
+ * @note Thread-safe: can be called from any thread
+ * @note Idempotent: safe to call multiple times
+ * @note Available since: v0.1.0
+ * 
+ * Example usage:
+ * @code
+ *   // Optional: Initialize explicitly at startup
+ *   MoqResult result = moq_init();
+ *   if (result.code != MOQ_OK) {
+ *       printf("Failed to initialize: %s\n", result.message);
+ *       moq_free_str(result.message);
+ *       return -1;
+ *   }
+ *   
+ *   // Now safe to create clients and connect
+ *   MoqClient* client = moq_client_create();
+ * @endcode
+ */
+MOQ_API MoqResult moq_init(void);
+
+/* ───────────────────────────────────────────────
  * Client Management
  * ─────────────────────────────────────────────── */
 
