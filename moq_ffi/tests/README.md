@@ -8,6 +8,46 @@ The integration tests validate end-to-end functionality of the moq-ffi library b
 
 ## Test Suites
 
+### Local Relay Integration Tests
+
+**File**: `local_relay_integration.rs`
+
+Tests the library against a locally-built moq-relay-ietf server from the External/moq-rs submodule:
+- **Relay**: Built from `External/moq-rs/moq-relay-ietf`
+- **Protocol**: IETF Draft 07 (matching the submodule)
+- **URL**: `https://localhost:4443`
+
+**Test Cases**:
+1. `test_local_relay_startup` - Validates relay can be built and started
+2. `test_connect_to_local_relay` - Tests connection attempt to local relay
+3. `test_local_relay_connection_lifecycle` - Tests connect/disconnect flow
+4. `test_local_relay_multiple_clients` - Tests multiple concurrent clients
+
+**Requirements**:
+- **Git submodule initialized**: Run `git submodule update --init --recursive`
+- **Rust toolchain**: To build moq-relay-ietf from submodule
+- **OpenSSL**: For generating test certificates (`openssl` command)
+- **Port 4443 available**: Tests bind to localhost:4443
+
+**Certificate Handling**:
+The tests generate self-signed certificates for the local relay. However, the moq-ffi client validates TLS certificates by default, which means connections may fail during certificate validation. This is expected and demonstrates:
+- The relay starts successfully
+- The client can attempt connection
+- Proper TLS handshake initiation
+
+To use the local relay with full connectivity in production scenarios, use properly signed certificates or configure certificate validation appropriately.
+
+**Running Local Relay Tests**:
+```bash
+# Ensure submodule is initialized
+cd /path/to/moq-ffi
+git submodule update --init --recursive
+
+# Run local relay integration tests
+cd moq_ffi
+cargo test --features with_moq_draft07 --test local_relay_integration -- --ignored --nocapture
+```
+
 ### Cloudflare Relay Integration Tests
 
 **File**: `cloudflare_relay_integration.rs`
