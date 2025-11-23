@@ -434,16 +434,12 @@ unsafe fn moq_connect_impl(
     // 3. Both should result in a compatible session for moq-transport
     let url_str_clone = url_str.clone();
     
-    eprintln!("🔍 [CONNECT] Starting connection to {}", url_str_clone);
     log::debug!("🔍 [CONNECT] Starting connection to {}", url_str_clone);
     
-    eprintln!("🔍 [CONNECT] About to call RUNTIME.block_on");
     let result = RUNTIME.block_on(async move {
-        eprintln!("🔍 [CONNECT] Inside runtime.block_on, wrapping with timeout");
         log::debug!("🔍 [CONNECT] Inside runtime.block_on, wrapping with timeout");
         // Wrap the entire connection process in a timeout
         match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), async {
-            eprintln!("🔍 [CONNECT] Inside timeout wrapper, creating endpoint");
             log::debug!("🔍 [CONNECT] Inside timeout wrapper, creating endpoint");
             // Create quinn endpoint for WebTransport over QUIC
             // Try IPv6 first, fall back to IPv4 if IPv6 is unavailable
@@ -492,9 +488,13 @@ unsafe fn moq_connect_impl(
             }
         }
 
-        let client_crypto = rustls::ClientConfig::builder()
+        let mut client_crypto = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        
+        // Set ALPN protocols for WebTransport over HTTP/3
+        // This is CRITICAL for protocol negotiation
+        client_crypto.alpn_protocols = vec![web_transport_quinn::ALPN.to_vec()];
 
         let mut client_config = quinn::ClientConfig::new(std::sync::Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
@@ -511,7 +511,6 @@ unsafe fn moq_connect_impl(
         
         endpoint.set_default_client_config(client_config);
 
-        eprintln!("🔍 [CONNECT] Endpoint configured, starting WebTransport connection");
         log::debug!("🔍 [CONNECT] Endpoint configured, starting WebTransport connection");
         
         // Connect via WebTransport (HTTP/3 over QUIC)
@@ -522,12 +521,10 @@ unsafe fn moq_connect_impl(
         log::info!("Connecting via WebTransport over QUIC to {} (Draft 14 - Latest)", url_str_clone);
         
         use web_transport_quinn::connect as wt_connect;
-        eprintln!("🔍 [CONNECT] Calling wt_connect...");
         log::debug!("🔍 [CONNECT] Calling wt_connect...");
         let wt_session_quinn = wt_connect(&endpoint, &parsed_url)
             .await
             .map_err(|e| {
-                eprintln!("🔍 [CONNECT] WebTransport connection failed: {}", e);
                 log::debug!("🔍 [CONNECT] WebTransport connection failed: {}", e);
                 format!("Failed to connect via WebTransport: {}", e)
             })?;
@@ -575,19 +572,16 @@ unsafe fn moq_connect_impl(
         Ok::<(), String>(())
         }).await {
             Ok(result) => {
-                eprintln!("🔍 [CONNECT] Timeout wrapper completed with result");
                 log::debug!("🔍 [CONNECT] Timeout wrapper completed with result");
                 result
             }
             Err(_) => {
-                eprintln!("🔍 [CONNECT] Connection timed out after {} seconds", CONNECT_TIMEOUT_SECS);
                 log::warn!("🔍 [CONNECT] Connection timed out after {} seconds", CONNECT_TIMEOUT_SECS);
                 Err(format!("Connection timeout after {} seconds", CONNECT_TIMEOUT_SECS))
             }
         }
     });
 
-    eprintln!("🔍 [CONNECT] block_on completed, processing result");
     log::debug!("🔍 [CONNECT] block_on completed, processing result");
 
     match result {
@@ -596,42 +590,33 @@ unsafe fn moq_connect_impl(
             make_ok_result()
         }
         Err(e) => {
-            eprintln!("🔍 [CONNECT] Connection failed, cleaning up: {}", e);
             log::error!("Connection failed: {}", e);
             set_last_error(e.clone());
             
-            eprintln!("🔍 [CONNECT] Locking client mutex for cleanup");
             // Notify connection failure and clean up partial state
             let inner_result = client_ref.inner.lock();
             let mut inner = match inner_result {
                 Ok(guard) => guard,
                 Err(poisoned) => {
-                    eprintln!("🔍 [CONNECT] Mutex was poisoned, recovering");
                     log::warn!("Mutex poisoned during connection failure, recovering");
                     poisoned.into_inner()
                 }
             };
-            eprintln!("🔍 [CONNECT] Mutex locked, clearing state");
             inner.connected = false;
             inner.url = None;
             inner.connection_callback = None;
             inner.connection_user_data = 0;
             
-            eprintln!("🔍 [CONNECT] Invoking failure callback if present");
             if let Some(callback) = connection_callback {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    eprintln!("🔍 [CONNECT] Calling callback with MoqStateFailed");
                     callback(user_data, MoqConnectionState::MoqStateFailed);
-                    eprintln!("🔍 [CONNECT] Callback completed");
                 }));
             }
             
-            eprintln!("🔍 [CONNECT] Creating error result");
             let result = make_error_result(
                 MoqResultCode::MoqErrorConnectionFailed,
                 &e,
             );
-            eprintln!("🔍 [CONNECT] Returning error result");
             result
         }
     }
