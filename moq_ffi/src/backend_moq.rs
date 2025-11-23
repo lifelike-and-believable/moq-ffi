@@ -416,6 +416,11 @@ unsafe fn moq_connect_impl(
         }
     };
 
+    // CRITICAL: Drop the mutex guard before async operations to prevent deadlock
+    // The async block needs to be able to lock the mutex to update state
+    let client_inner = client_ref.inner.clone();
+    drop(inner); // Explicitly drop the MutexGuard
+    
     // Establish WebTransport connection over QUIC asynchronously
     // Priority: Draft 07 (CloudFlare production relay)
     // Both Draft 07 and Draft 14 use WebTransport over QUIC
@@ -427,11 +432,15 @@ unsafe fn moq_connect_impl(
     //    - https:// -> WebTransport (current implementation)
     //    - quic:// -> Raw QUIC (to be implemented)
     // 3. Both should result in a compatible session for moq-transport
-    let client_inner = client_ref.inner.clone();
     let url_str_clone = url_str.clone();
+    
+    log::debug!("🔍 [CONNECT] Starting connection to {}", url_str_clone);
+    
     let result = RUNTIME.block_on(async move {
+        log::debug!("🔍 [CONNECT] Inside runtime.block_on, wrapping with timeout");
         // Wrap the entire connection process in a timeout
         match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), async {
+            log::debug!("🔍 [CONNECT] Inside timeout wrapper, creating endpoint");
             // Create quinn endpoint for WebTransport over QUIC
             // Try IPv6 first, fall back to IPv4 if IPv6 is unavailable
             // This handles systems where IPv6 is disabled or not supported
@@ -479,9 +488,13 @@ unsafe fn moq_connect_impl(
             }
         }
 
-        let client_crypto = rustls::ClientConfig::builder()
+        let mut client_crypto = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        
+        // Set ALPN protocols for WebTransport over HTTP/3
+        // This is CRITICAL for protocol negotiation
+        client_crypto.alpn_protocols = vec![web_transport_quinn::ALPN.to_vec()];
 
         let mut client_config = quinn::ClientConfig::new(std::sync::Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
@@ -498,6 +511,8 @@ unsafe fn moq_connect_impl(
         
         endpoint.set_default_client_config(client_config);
 
+        log::debug!("🔍 [CONNECT] Endpoint configured, starting WebTransport connection");
+        
         // Connect via WebTransport (HTTP/3 over QUIC)
         #[cfg(feature = "with_moq_draft07")]
         log::info!("Connecting via WebTransport over QUIC to {} (Draft 07 - CloudFlare)", url_str_clone);
@@ -506,21 +521,31 @@ unsafe fn moq_connect_impl(
         log::info!("Connecting via WebTransport over QUIC to {} (Draft 14 - Latest)", url_str_clone);
         
         use web_transport_quinn::connect as wt_connect;
+        log::debug!("🔍 [CONNECT] Calling wt_connect...");
         let wt_session_quinn = wt_connect(&endpoint, &parsed_url)
             .await
-            .map_err(|e| format!("Failed to connect via WebTransport: {}", e))?;
+            .map_err(|e| {
+                log::debug!("🔍 [CONNECT] WebTransport connection failed: {}", e);
+                format!("Failed to connect via WebTransport: {}", e)
+            })?;
         
+        log::debug!("🔍 [CONNECT] wt_connect succeeded, converting to generic session");
         // Convert to generic web_transport::Session
         let wt_session = web_transport::Session::from(wt_session_quinn);
 
         log::info!("WebTransport session established to {}", url_str_clone);
+        log::debug!("🔍 [CONNECT] Starting MoQ session handshake");
 
         // Establish MoQ session over the transport
         let (moq_session, publisher, subscriber) = Session::connect(wt_session)
             .await
-            .map_err(|e| format!("Failed to establish MoQ session: {}", e))?;
+            .map_err(|e| {
+                log::debug!("🔍 [CONNECT] MoQ session establishment failed: {}", e);
+                format!("Failed to establish MoQ session: {}", e)
+            })?;
 
         log::info!("MoQ session established");
+        log::debug!("🔍 [CONNECT] MoQ session handshake complete");
 
         // Store session and publisher/subscriber
         let mut inner = client_inner.lock()
@@ -546,10 +571,18 @@ unsafe fn moq_connect_impl(
 
         Ok::<(), String>(())
         }).await {
-            Ok(result) => result,
-            Err(_) => Err(format!("Connection timeout after {} seconds", CONNECT_TIMEOUT_SECS)),
+            Ok(result) => {
+                log::debug!("🔍 [CONNECT] Timeout wrapper completed with result");
+                result
+            }
+            Err(_) => {
+                log::warn!("🔍 [CONNECT] Connection timed out after {} seconds", CONNECT_TIMEOUT_SECS);
+                Err(format!("Connection timeout after {} seconds", CONNECT_TIMEOUT_SECS))
+            }
         }
     });
+
+    log::debug!("🔍 [CONNECT] block_on completed, processing result");
 
     match result {
         Ok(()) => {
@@ -580,10 +613,11 @@ unsafe fn moq_connect_impl(
                 }));
             }
             
-            make_error_result(
+            let result = make_error_result(
                 MoqResultCode::MoqErrorConnectionFailed,
                 &e,
-            )
+            );
+            result
         }
     }
 }
