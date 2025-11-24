@@ -82,6 +82,12 @@ rustls-native-certs = { version = "0.8", optional = true }
 log = "0.4"
 
 # ───────────────────────────────────────────────
+# Dev Dependencies (for tests)
+# ───────────────────────────────────────────────
+[dev-dependencies]
+anyhow = "1.0"
+
+# ───────────────────────────────────────────────
 # Build profile
 # ───────────────────────────────────────────────
 [profile.release]
