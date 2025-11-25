@@ -1,5 +1,0 @@
-[build]
-target = "x86_64-pc-windows-msvc"
-
-[env]
-AWS_LC_SYS_CFLAGS = "/wd4100 /wd4206"
