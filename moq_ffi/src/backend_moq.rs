@@ -46,7 +46,6 @@ use moq::coding::Tuple as TrackNamespace;
 // Timeout configuration for async operations
 // These timeouts prevent operations from hanging indefinitely
 const CONNECT_TIMEOUT_SECS: u64 = 30;
-const SUBSCRIBE_TIMEOUT_SECS: u64 = 30;
 
 // Global tokio runtime for async operations
 // This runtime handles:
@@ -102,7 +101,7 @@ fn get_last_error() -> Option<String> {
  * ─────────────────────────────────────────────── */
 
 use moq::{
-    serve::{self, TracksWriter},
+    serve::{self, TracksWriter, Tracks},
     session::{Publisher as MoqTransportPublisher, Session, Subscriber as MoqTransportSubscriber},
 };
 
@@ -114,7 +113,7 @@ struct ClientInner {
     subscriber: Option<MoqTransportSubscriber>,
     connection_callback: MoqConnectionCallback,
     connection_user_data: usize, // Store as usize for Send safety
-    // Track announced namespaces
+    // Track announced namespaces (for publishing)
     announced_namespaces: HashMap<TrackNamespace, TracksWriter>,
     // Handle to session run task
     session_task: Option<tokio::task::JoinHandle<()>>,
@@ -126,7 +125,7 @@ pub struct MoqClient {
 }
 
 enum PublisherMode {
-    Stream(serve::StreamWriter),
+    Subgroups(serve::SubgroupsWriter),
     Datagrams(serve::DatagramsWriter),
 }
 
@@ -1048,6 +1047,7 @@ unsafe fn moq_create_publisher_ex_impl(
     };
 
     // Create writer based on requested delivery mode
+    // Following moq-pub pattern: use groups() for stream delivery, datagrams() for datagram
     let mode = match delivery_mode {
         MoqDeliveryMode::MoqDeliveryDatagram => {
             match track.datagrams() {
@@ -1059,10 +1059,11 @@ unsafe fn moq_create_publisher_ex_impl(
             }
         }
         MoqDeliveryMode::MoqDeliveryStream => {
-            match track.stream(0) {
-                Ok(s) => PublisherMode::Stream(s),
+            // Use groups() like moq-pub does, not stream()
+            match track.groups() {
+                Ok(s) => PublisherMode::Subgroups(s),
                 Err(e) => {
-                    set_last_error(format!("Failed to create stream writer: {}", e));
+                    set_last_error(format!("Failed to create subgroups writer: {}", e));
                     return std::ptr::null_mut();
                 }
             }
@@ -1189,11 +1190,11 @@ unsafe fn moq_publish_data_impl(
     let namespace = inner.namespace.clone();
     let track_name = inner.track_name.clone();
     
-    // Get counter value before borrowing mode mutably
+    // Get counter value before borrowing mode
     let counter_val = inner.group_id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     
-    // Publish data based on mode (using synchronous API)
-    // Note: delivery_mode parameter is ignored; mode is set at publisher creation
+    // Publish data based on mode
+    // Following moq-pub pattern: use subgroups.append() then subgroup.write()
     let result = match &mut inner.mode {
         PublisherMode::Datagrams(datagrams) => {
             // Create a datagram with metadata
@@ -1220,15 +1221,25 @@ unsafe fn moq_publish_data_impl(
                     log::debug!("Published {} bytes to {:?}/{} via datagram", data_len, namespace, track_name);
                 })
         }
-        PublisherMode::Stream(stream) => {
-            stream.create(counter_val)
-                .and_then(|mut group| {
-                    group.write(data_bytes)
-                })
-                .map_err(|e| format!("Failed to write to stream: {}", e))
-                .map(|_| {
-                    log::debug!("Published {} bytes to {:?}/{} via stream", data_len, namespace, track_name);
-                })
+        PublisherMode::Subgroups(subgroups) => {
+            // Following moq-pub pattern:
+            // 1. Create a new subgroup with append(priority)
+            // 2. Write data to it with write()
+            // For simplicity, create a new subgroup for each publish (like moq-pub does for keyframes)
+            let priority: u8 = 127; // Same as moq-pub uses
+            
+            match subgroups.append(priority) {
+                Ok(mut subgroup) => {
+                    subgroup.write(data_bytes)
+                        .map_err(|e| format!("Failed to write to subgroup: {}", e))
+                        .map(|_| {
+                            log::debug!("Published {} bytes to {:?}/{} via subgroup", data_len, namespace, track_name);
+                        })
+                }
+                Err(e) => {
+                    Err(format!("Failed to create subgroup: {}", e))
+                }
+            }
         }
     };
 
@@ -1315,7 +1326,7 @@ unsafe fn moq_subscribe_impl(
 
     let client_ref = &*client;
     let inner_result = client_ref.inner.lock();
-    let mut inner = match inner_result {
+    let inner = match inner_result {
         Ok(guard) => guard,
         Err(poisoned) => {
             log::warn!("Mutex poisoned in moq_subscribe, recovering");
@@ -1331,8 +1342,8 @@ unsafe fn moq_subscribe_impl(
     // Parse namespace
     let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
 
-    // Get subscriber
-    let mut subscriber_impl = match inner.subscriber.as_mut() {
+    // Get subscriber (we need to clone it to use in async context)
+    let subscriber_impl = match inner.subscriber.as_ref() {
         Some(s) => s.clone(),
         None => {
             set_last_error("Subscriber not available".to_string());
@@ -1342,25 +1353,45 @@ unsafe fn moq_subscribe_impl(
 
     drop(inner);
 
-    // Create track writer/reader pair for subscription
-    let (track_writer, track_reader) = serve::Track::new(track_namespace.clone(), track_name_str.clone()).produce();
+    // Following moq-sub pattern:
+    // 1. Create a Tracks for the namespace we want to subscribe to
+    // 2. Call tracks.produce() to get (TracksWriter, TracksRequest, TracksReader)
+    // 3. Use TracksWriter.create() to create a track entry
+    // 4. Call subscriber.subscribe(track_writer) to register subscription with relay
+    // 5. Use TracksReader.subscribe() to get the TrackReader for receiving data
+    
+    let tracks = Tracks::new(track_namespace.clone());
+    let (mut tracks_writer, _tracks_request, mut tracks_reader) = tracks.produce();
+    
+    // Create track writer for this specific track
+    let track_writer = match tracks_writer.create(&track_name_str) {
+        Some(tw) => tw,
+        None => {
+            set_last_error("Failed to create track writer (tracks closed)".to_string());
+            return std::ptr::null_mut();
+        }
+    };
 
-    // Subscribe to the track with timeout
-    let subscribe_result = RUNTIME.block_on(async move {
-        match timeout(Duration::from_secs(SUBSCRIBE_TIMEOUT_SECS), async {
-            subscriber_impl.subscribe(track_writer).await
-                .map_err(|e| format!("Failed to subscribe: {}", e))
-        }).await {
-            Ok(result) => result,
-            Err(_) => Err(format!("Subscribe timeout after {} seconds", SUBSCRIBE_TIMEOUT_SECS)),
+    // Clone subscriber for the async task
+    let mut subscriber_for_task = subscriber_impl.clone();
+    let track_name_for_task = track_name_str.clone();
+    
+    // Spawn task to send subscribe request to relay (async, non-blocking)
+    // This follows the moq-sub pattern where subscribe is spawned as a task
+    RUNTIME.spawn(async move {
+        if let Err(err) = subscriber_for_task.subscribe(track_writer).await {
+            log::warn!("Failed to subscribe to track {}: {}", track_name_for_task, err);
         }
     });
 
-    if let Err(e) = subscribe_result {
-        set_last_error(e.clone());
-        log::error!("Subscription failed: {}", e);
-        return std::ptr::null_mut();
-    }
+    // Get the track reader from TracksReader - this will block until the track is available
+    let track_reader = match tracks_reader.subscribe(&track_name_str) {
+        Some(tr) => tr,
+        None => {
+            set_last_error("Failed to get track reader (no track available)".to_string());
+            return std::ptr::null_mut();
+        }
+    };
 
     // Create subscriber and spawn task to read incoming data
     let subscriber_inner = Arc::new(Mutex::new(SubscriberInner {
@@ -1376,7 +1407,7 @@ unsafe fn moq_subscribe_impl(
     let track_namespace_log = track_namespace.clone();
     let track_name_log = track_name_str.clone();
     
-    // Spawn task to read data from track
+    // Spawn task to read data from track - following moq-sub pattern exactly
     let inner_clone = subscriber_inner.clone();
     let reader_task = RUNTIME.spawn(async move {
         let track = {
@@ -1389,163 +1420,98 @@ unsafe fn moq_subscribe_impl(
             }
         };
 
-        // Get the mode once (it's set when track is established)
+        log::debug!("Starting track reader for {:?}/{}", track_namespace_log, track_name_log);
+
+        // Get the mode - following moq-sub pattern
         let mode_result = track.mode().await;
         match mode_result {
             Ok(mode) => {
                 use moq::serve::TrackReaderMode;
                 
-                loop {
-                    let data_result = match &mode {
-                        TrackReaderMode::Stream(stream) => {
-                            // Read from stream - groups contain objects
-                            let mut stream = stream.clone();
-                            match stream.next().await {
-                                Ok(Some(mut group)) => {
-                                    match group.next().await {
-                                        Ok(Some(mut object)) => {
-                                            // Read all chunks from object
-                                            let mut buffer = Vec::new();
-                                            loop {
-                                                match object.read().await {
-                                                    Ok(Some(chunk)) => {
-                                                        buffer.extend_from_slice(&chunk);
-                                                    }
-                                                    Ok(None) => break,
-                                                    Err(_) => break,
-                                                }
-                                            }
-                                            if !buffer.is_empty() {
-                                                Some(buffer)
-                                            } else {
-                                                None
-                                            }
+                match mode {
+                    TrackReaderMode::Subgroups(mut groups) => {
+                        // Following moq-sub recv_track pattern exactly
+                        log::debug!("Track {:?}/{} using Subgroups mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(mut group)) = groups.next().await {
+                            log::trace!("Received group {} for {:?}/{}", group.group_id, track_namespace_log, track_name_log);
+                            // Following moq-sub recv_group pattern
+                            while let Ok(Some(mut object)) = group.next().await {
+                                log::trace!("Received object {} in group {}", object.object_id, group.group_id);
+                                // Following moq-sub recv_object pattern
+                                let mut buf = Vec::with_capacity(object.size);
+                                while let Ok(Some(chunk)) = object.read().await {
+                                    buf.extend_from_slice(&chunk);
+                                }
+                                
+                                if !buf.is_empty() {
+                                    // Invoke callback with panic protection
+                                    let inner_result = inner_clone.lock();
+                                    let inner = match inner_result {
+                                        Ok(guard) => guard,
+                                        Err(poisoned) => {
+                                            log::warn!("Mutex poisoned in subscriber callback, recovering");
+                                            poisoned.into_inner()
                                         }
-                                        _ => None,
+                                    };
+                                    if let Some(callback) = inner.data_callback {
+                                        log::debug!("Invoking callback with {} bytes", buf.len());
+                                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                            callback(inner.user_data as *mut std::ffi::c_void, buf.as_ptr(), buf.len());
+                                        }));
                                     }
                                 }
-                                Ok(None) => {
-                                    log::info!("Stream ended: {:?}/{}", track_namespace_log, track_name_log);
-                                    break;
-                                }
-                                Err(e) => {
-                                    log::error!("Stream read error: {}", e);
-                                    None
-                                }
                             }
                         }
-                        #[cfg(feature = "with_moq")]
-                        TrackReaderMode::Subgroups(subgroups) => {
-                            // Read from subgroups (Draft 14)
-                            let mut subgroups = subgroups.clone();
-                            match subgroups.next().await {
-                                Ok(Some(mut subgroup)) => {
-                                    match subgroup.next().await {
-                                        Ok(Some(mut object)) => {
-                                            // Read all chunks from object
-                                            let mut buffer = Vec::new();
-                                            loop {
-                                                match object.read().await {
-                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
-                                                    Ok(None) => break,
-                                                    Err(_) => break,
-                                                }
-                                            }
-                                            if !buffer.is_empty() {
-                                                Some(buffer)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
+                        log::debug!("Track {:?}/{} subgroups ended", track_namespace_log, track_name_log);
+                    }
+                    TrackReaderMode::Stream(mut stream) => {
+                        log::debug!("Track {:?}/{} using Stream mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(mut group)) = stream.next().await {
+                            while let Ok(Some(mut object)) = group.next().await {
+                                let mut buf = Vec::new();
+                                while let Ok(Some(chunk)) = object.read().await {
+                                    buf.extend_from_slice(&chunk);
+                                }
+                                
+                                if !buf.is_empty() {
+                                    let inner_result = inner_clone.lock();
+                                    let inner = match inner_result {
+                                        Ok(guard) => guard,
+                                        Err(poisoned) => poisoned.into_inner()
+                                    };
+                                    if let Some(callback) = inner.data_callback {
+                                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                            callback(inner.user_data as *mut std::ffi::c_void, buf.as_ptr(), buf.len());
+                                        }));
                                     }
                                 }
-                                Ok(None) => {
-                                    log::info!("Subgroups ended: {:?}/{}", track_namespace_log, track_name_log);
-                                    break;
-                                }
-                                Err(e) => {
-                                    log::error!("Subgroups read error: {}", e);
-                                    None
+                            }
+                        }
+                        log::debug!("Track {:?}/{} stream ended", track_namespace_log, track_name_log);
+                    }
+                    TrackReaderMode::Datagrams(mut datagrams) => {
+                        log::debug!("Track {:?}/{} using Datagrams mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(datagram)) = datagrams.read().await {
+                            let buf = datagram.payload.to_vec();
+                            if !buf.is_empty() {
+                                let inner_result = inner_clone.lock();
+                                let inner = match inner_result {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => poisoned.into_inner()
+                                };
+                                if let Some(callback) = inner.data_callback {
+                                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        callback(inner.user_data as *mut std::ffi::c_void, buf.as_ptr(), buf.len());
+                                    }));
                                 }
                             }
                         }
-                        #[cfg(feature = "with_moq_draft07")]
-                        TrackReaderMode::Subgroups(subgroups) => {
-                            // Read from subgroups (Draft 07)
-                            let mut subgroups = subgroups.clone();
-                            match subgroups.next().await {
-                                Ok(Some(mut group)) => {
-                                    match group.next().await {
-                                        Ok(Some(mut object)) => {
-                                            // Read all chunks from object
-                                            let mut buffer = Vec::new();
-                                            loop {
-                                                match object.read().await {
-                                                    Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
-                                                    Ok(None) => break,
-                                                    Err(_) => break,
-                                                }
-                                            }
-                                            if !buffer.is_empty() {
-                                                Some(buffer)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                Ok(None) => {
-                                    log::info!("Subgroups ended: {:?}/{}", track_namespace_log, track_name_log);
-                                    break;
-                                }
-                                Err(e) => {
-                                    log::error!("Subgroups read error: {}", e);
-                                    None
-                                }
-                            }
-                        }
-                        TrackReaderMode::Datagrams(datagrams) => {
-                            // Read datagram
-                            let mut datagrams = datagrams.clone();
-                            match datagrams.read().await {
-                                Ok(Some(datagram)) => {
-                                    // Datagram payload - API is same for both drafts
-                                    Some(datagram.payload.to_vec())
-                                }
-                                Ok(None) => {
-                                    log::info!("Datagrams ended: {:?}/{}", track_namespace_log, track_name_log);
-                                    break;
-                                }
-                                Err(e) => {
-                                    log::error!("Datagram read error: {}", e);
-                                    None
-                                }
-                            }
-                        }
-                    };
-
-                    // Invoke callback if we got data (with panic protection)
-                    if let Some(buffer) = data_result {
-                        let inner_result = inner_clone.lock();
-                        let inner = match inner_result {
-                            Ok(guard) => guard,
-                            Err(poisoned) => {
-                                log::warn!("Mutex poisoned in subscriber callback, recovering");
-                                poisoned.into_inner()
-                            }
-                        };
-                        if let Some(callback) = inner.data_callback {
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                callback(inner.user_data as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len());
-                            }));
-                        }
+                        log::debug!("Track {:?}/{} datagrams ended", track_namespace_log, track_name_log);
                     }
                 }
             }
             Err(e) => {
-                log::error!("Failed to get track mode: {}", e);
+                log::error!("Failed to get track mode for {:?}/{}: {}", track_namespace_log, track_name_log, e);
             }
         }
     });
@@ -2749,9 +2715,7 @@ mod tests {
             // Verify timeout constants are configured correctly
             // Note: These are compile-time constants, validation is documentary
             // CONNECT_TIMEOUT_SECS = 30 (positive and <= 300)
-            // SUBSCRIBE_TIMEOUT_SECS = 30 (positive and <= 300)
             assert_eq!(CONNECT_TIMEOUT_SECS, 30);
-            assert_eq!(SUBSCRIBE_TIMEOUT_SECS, 30);
         }
 
         #[test]
