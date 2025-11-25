@@ -44,19 +44,19 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build (Release, with_moq)
+      - name: Build (Release, with_moq_draft07)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cd moq_ffi
-          cargo build --release --features with_moq
+          cargo build --release --features with_moq_draft07
 
       - name: Run tests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cd moq_ffi
-          cargo test --features with_moq
+          cargo test --features with_moq_draft07
 
       - name: Package SDK (headers + libs + dll + pdb)
         shell: pwsh
@@ -114,15 +114,15 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build (Release, with_moq)
+      - name: Build (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq
+          cargo build --release --features with_moq_draft07
 
       - name: Run tests
         run: |
           cd moq_ffi
-          cargo test --features with_moq
+          cargo test --features with_moq_draft07
 
       - name: Package SDK (headers + libs)
         run: |
@@ -261,15 +261,15 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build x86_64 (Release, with_moq)
+      - name: Build x86_64 (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq --target x86_64-apple-darwin
+          cargo build --release --features with_moq_draft07 --target x86_64-apple-darwin
 
-      - name: Build aarch64 (Release, with_moq)
+      - name: Build aarch64 (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq --target aarch64-apple-darwin
+          cargo build --release --features with_moq_draft07 --target aarch64-apple-darwin
 
       - name: Create universal binary
         run: |
