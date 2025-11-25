@@ -81,9 +81,9 @@ rustls-native-certs = { version = "0.8", optional = true }
 # Logging
 log = "0.4"
 
-[patch."https://github.com/cloudflare/moq-rs.git"]
+# [patch."https://github.com/cloudflare/moq-rs.git"]
 # Override the Draft-07 dependency with our local fork so we can apply hotfixes
-moq-transport = { path = "../External/moq-rs/moq-transport" }
+# moq-transport = { path = "../External/moq-rs/moq-transport" }
 
 # ───────────────────────────────────────────────
 # Dev Dependencies (for tests)
