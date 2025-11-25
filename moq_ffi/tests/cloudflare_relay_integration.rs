@@ -15,10 +15,12 @@
 #![cfg(feature = "with_moq_draft07")]
 #![allow(clippy::unnecessary_safety_comment)]
 
-use std::ffi::CString;
+use std::collections::BTreeSet;
+use std::ffi::{CStr, CString};
 use std::ptr;
+use std::slice;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Import FFI functions and types from the moq_ffi library
 // Integration tests run as external crates and import via the library name
@@ -73,6 +75,7 @@ struct DataTracker {
     data_received: bool,
     received_count: usize,
     last_data_size: usize,
+    payloads: Vec<Vec<u8>>,
 }
 
 #[allow(dead_code)]
@@ -82,6 +85,7 @@ impl DataTracker {
             data_received: false,
             received_count: 0,
             last_data_size: 0,
+            payloads: Vec::new(),
         }
     }
 }
@@ -90,7 +94,7 @@ impl DataTracker {
 #[allow(dead_code)]
 unsafe extern "C" fn data_received_callback(
     user_data: *mut std::ffi::c_void,
-    _data: *const u8,
+    data: *const u8,
     data_len: usize,
 ) {
     if user_data.is_null() {
@@ -105,6 +109,12 @@ unsafe extern "C" fn data_received_callback(
         t.data_received = true;
         t.received_count += 1;
         t.last_data_size = data_len;
+        if !data.is_null() && data_len > 0 {
+            let payload = slice::from_raw_parts(data, data_len).to_vec();
+            t.payloads.push(payload);
+        } else {
+            t.payloads.push(Vec::new());
+        }
         println!("[Callback] Received data: {} bytes (total count: {})", data_len, t.received_count);
     }
 }
@@ -125,6 +135,26 @@ where
     }
     
     false
+}
+
+fn log_result(label: &str, result: &MoqResult) {
+    println!("{} result: {:?}", label, result.code);
+    if !result.message.is_null() {
+        let msg = unsafe { CStr::from_ptr(result.message) };
+        println!("{} message: {}", label, msg.to_string_lossy());
+        unsafe { moq_free_str(result.message) };
+    }
+}
+
+fn last_error_message() -> Option<String> {
+    unsafe {
+        let err_ptr = moq_last_error();
+        if err_ptr.is_null() {
+            None
+        } else {
+            CStr::from_ptr(err_ptr).to_str().ok().map(|s| s.to_string())
+        }
+    }
 }
 
 #[test]
@@ -388,6 +418,538 @@ fn test_full_publish_workflow() {
     }
     
     println!("=== Test Complete ===\n");
+}
+
+#[test]
+#[ignore] // Requires network connectivity and relay pub/sub support
+fn test_publish_subscribe_roundtrip() {
+    println!("\n=== Test: Publish/Subscribe Roundtrip ===");
+    assert!(moq_init(), "moq_init() should succeed");
+
+    let publisher_client = moq_client_create();
+    let subscriber_client = moq_client_create();
+    assert!(!publisher_client.is_null(), "Failed to create publisher client");
+    assert!(!subscriber_client.is_null(), "Failed to create subscriber client");
+
+    let publisher_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let subscriber_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let pub_state_ptr = &publisher_state as *const _ as *mut std::ffi::c_void;
+    let sub_state_ptr = &subscriber_state as *const _ as *mut std::ffi::c_void;
+
+    let data_tracker = Arc::new(Mutex::new(DataTracker::new()));
+    let data_tracker_ptr = &data_tracker as *const _ as *mut std::ffi::c_void;
+
+    let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
+    let publisher_connect = unsafe {
+        moq_connect(
+            publisher_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            pub_state_ptr,
+        )
+    };
+    log_result("Publisher connect", &publisher_connect);
+    assert!(
+        publisher_connect.code == MoqResultCode::MoqOk
+            || publisher_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Publisher connect should succeed or report timeout"
+    );
+
+    let subscriber_connect = unsafe {
+        moq_connect(
+            subscriber_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            sub_state_ptr,
+        )
+    };
+    log_result("Subscriber connect", &subscriber_connect);
+    assert!(
+        subscriber_connect.code == MoqResultCode::MoqOk
+            || subscriber_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Subscriber connect should succeed or report timeout"
+    );
+
+    let publisher_connected = wait_for_condition(
+        || {
+            if let Ok(state) = publisher_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(
+        publisher_connected,
+        "Publisher client failed to reach connected state within timeout"
+    );
+
+    let subscriber_connected = wait_for_condition(
+        || {
+            if let Ok(state) = subscriber_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(
+        subscriber_connected,
+        "Subscriber client failed to reach connected state within timeout"
+    );
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_millis();
+    let namespace = format!("moq-ffi-test/roundtrip-{}", timestamp);
+    let track_name = format!("track-{}", timestamp);
+
+    let namespace_c = CString::new(namespace.clone()).unwrap();
+    let announce_result = unsafe { moq_announce_namespace(publisher_client, namespace_c.as_ptr()) };
+    log_result("Announce namespace", &announce_result);
+    assert_eq!(
+        announce_result.code,
+        MoqResultCode::MoqOk,
+        "Announce namespace should succeed"
+    );
+
+    let track_c = CString::new(track_name.clone()).unwrap();
+    let publisher_handle = unsafe {
+        moq_create_publisher(publisher_client, namespace_c.as_ptr(), track_c.as_ptr())
+    };
+    assert!(
+        !publisher_handle.is_null(),
+        "Publisher handle should not be null"
+    );
+
+    let namespace_c_sub = CString::new(namespace.clone()).unwrap();
+    let track_c_sub = CString::new(track_name.clone()).unwrap();
+    let subscriber_handle = unsafe {
+        moq_subscribe(
+            subscriber_client,
+            namespace_c_sub.as_ptr(),
+            track_c_sub.as_ptr(),
+            Some(data_received_callback),
+            data_tracker_ptr,
+        )
+    };
+    assert!(
+        !subscriber_handle.is_null(),
+        "Subscriber handle should not be null: {:?}",
+        last_error_message()
+    );
+
+    let payloads: Vec<Vec<u8>> = vec![
+        b"ffi-roundtrip-object-1".to_vec(),
+        b"ffi-roundtrip-object-2".to_vec(),
+    ];
+
+    for (index, payload) in payloads.iter().enumerate() {
+        let publish_result = unsafe {
+            moq_publish_data(
+                publisher_handle,
+                payload.as_ptr(),
+                payload.len(),
+                MoqDeliveryMode::MoqDeliveryStream,
+            )
+        };
+        log_result(&format!("Publish payload {}", index), &publish_result);
+        assert_eq!(
+            publish_result.code,
+            MoqResultCode::MoqOk,
+            "Publish {} should succeed",
+            index
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let expected_count = payloads.len();
+    let received = wait_for_condition(
+        || {
+            if let Ok(tracker) = data_tracker.lock() {
+                tracker.received_count >= expected_count
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(
+        received,
+        "Expected subscriber to receive {} payloads",
+        expected_count
+    );
+
+    if let Ok(tracker) = data_tracker.lock() {
+        assert!(
+            tracker.payloads.len() >= expected_count,
+            "Subscriber did not store all payloads"
+        );
+        for (index, expected_payload) in payloads.iter().enumerate() {
+            let received_payload = tracker
+                .payloads
+                .get(index)
+                .expect("Missing payload entry");
+            assert_eq!(
+                received_payload,
+                expected_payload,
+                "Payload {} data mismatch",
+                index
+            );
+        }
+    }
+
+    unsafe {
+        moq_subscriber_destroy(subscriber_handle);
+        moq_publisher_destroy(publisher_handle);
+        moq_disconnect(publisher_client);
+        moq_disconnect(subscriber_client);
+        moq_client_destroy(publisher_client);
+        moq_client_destroy(subscriber_client);
+    }
+
+    println!("=== Publish/Subscribe Roundtrip Test Complete ===\n");
+}
+
+#[test]
+#[ignore] // Requires network connectivity and relay pub/sub support
+fn test_publish_subscribe_single_object_group() {
+    println!("\n=== Test: Publish/Subscribe Single Object per Group ===");
+    assert!(moq_init(), "moq_init() should succeed");
+
+    let publisher_client = moq_client_create();
+    let subscriber_client = moq_client_create();
+    assert!(!publisher_client.is_null(), "Failed to create publisher client");
+    assert!(!subscriber_client.is_null(), "Failed to create subscriber client");
+
+    let publisher_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let subscriber_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let pub_state_ptr = &publisher_state as *const _ as *mut std::ffi::c_void;
+    let sub_state_ptr = &subscriber_state as *const _ as *mut std::ffi::c_void;
+
+    let data_tracker = Arc::new(Mutex::new(DataTracker::new()));
+    let data_tracker_ptr = &data_tracker as *const _ as *mut std::ffi::c_void;
+
+    let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
+    let publisher_connect = unsafe {
+        moq_connect(
+            publisher_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            pub_state_ptr,
+        )
+    };
+    log_result("Publisher connect", &publisher_connect);
+    assert!(
+        publisher_connect.code == MoqResultCode::MoqOk
+            || publisher_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Publisher connect should succeed or timeout"
+    );
+
+    let subscriber_connect = unsafe {
+        moq_connect(
+            subscriber_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            sub_state_ptr,
+        )
+    };
+    log_result("Subscriber connect", &subscriber_connect);
+    assert!(
+        subscriber_connect.code == MoqResultCode::MoqOk
+            || subscriber_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Subscriber connect should succeed or timeout"
+    );
+
+    let publisher_connected = wait_for_condition(
+        || {
+            if let Ok(state) = publisher_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(publisher_connected, "Publisher did not enter connected state");
+
+    let subscriber_connected = wait_for_condition(
+        || {
+            if let Ok(state) = subscriber_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(subscriber_connected, "Subscriber did not enter connected state");
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_micros();
+    let namespace = format!("moq-ffi-test/single-object-{}", timestamp);
+    let track_name = format!("track-{}", timestamp);
+
+    let namespace_c = CString::new(namespace.clone()).unwrap();
+    let track_c = CString::new(track_name.clone()).unwrap();
+
+    let announce_result = unsafe { moq_announce_namespace(publisher_client, namespace_c.as_ptr()) };
+    log_result("Announce namespace", &announce_result);
+    assert_eq!(announce_result.code, MoqResultCode::MoqOk);
+
+    let publisher_handle = unsafe {
+        moq_create_publisher(publisher_client, namespace_c.as_ptr(), track_c.as_ptr())
+    };
+    assert!(!publisher_handle.is_null(), "Publisher handle should not be null");
+
+    let namespace_c_sub = CString::new(namespace.clone()).unwrap();
+    let track_c_sub = CString::new(track_name.clone()).unwrap();
+    let subscriber_handle = unsafe {
+        moq_subscribe(
+            subscriber_client,
+            namespace_c_sub.as_ptr(),
+            track_c_sub.as_ptr(),
+            Some(data_received_callback),
+            data_tracker_ptr,
+        )
+    };
+    assert!(
+        !subscriber_handle.is_null(),
+        "Subscriber handle should not be null: {:?}",
+        last_error_message()
+    );
+
+    // Publish a single payload to match one-object-per-group semantics
+    let payload = b"ffi-single-object-test".to_vec();
+    let publish_result = unsafe {
+        moq_publish_data(
+            publisher_handle,
+            payload.as_ptr(),
+            payload.len(),
+            MoqDeliveryMode::MoqDeliveryStream,
+        )
+    };
+    log_result("Publish single payload", &publish_result);
+    assert_eq!(publish_result.code, MoqResultCode::MoqOk, "Publish should succeed");
+
+    let received = wait_for_condition(
+        || {
+            if let Ok(tracker) = data_tracker.lock() {
+                tracker.received_count >= 1
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(received, "Subscriber did not receive payload");
+
+    if let Ok(tracker) = data_tracker.lock() {
+        let first_payload = tracker.payloads.get(0).expect("Missing payload entry");
+        assert_eq!(first_payload, &payload, "Single payload mismatch");
+    }
+
+    unsafe {
+        moq_subscriber_destroy(subscriber_handle);
+        moq_publisher_destroy(publisher_handle);
+        moq_disconnect(publisher_client);
+        moq_disconnect(subscriber_client);
+        moq_client_destroy(publisher_client);
+        moq_client_destroy(subscriber_client);
+    }
+
+    println!("=== Single Object per Group Test Complete ===\n");
+}
+
+#[test]
+#[ignore] // Requires network connectivity and relay datagram support
+fn test_publish_subscribe_datagram_delivery() {
+    println!("\n=== Test: Publish/Subscribe via Datagram Delivery ===");
+    assert!(moq_init(), "moq_init() should succeed");
+
+    let publisher_client = moq_client_create();
+    let subscriber_client = moq_client_create();
+    assert!(!publisher_client.is_null(), "Failed to create publisher client");
+    assert!(!subscriber_client.is_null(), "Failed to create subscriber client");
+
+    let publisher_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let subscriber_state = Arc::new(Mutex::new(ConnectionStateTracker::new()));
+    let pub_state_ptr = &publisher_state as *const _ as *mut std::ffi::c_void;
+    let sub_state_ptr = &subscriber_state as *const _ as *mut std::ffi::c_void;
+
+    let data_tracker = Arc::new(Mutex::new(DataTracker::new()));
+    let data_tracker_ptr = &data_tracker as *const _ as *mut std::ffi::c_void;
+
+    let url = CString::new(CLOUDFLARE_RELAY_URL).unwrap();
+    let publisher_connect = unsafe {
+        moq_connect(
+            publisher_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            pub_state_ptr,
+        )
+    };
+    log_result("Publisher connect", &publisher_connect);
+    assert!(
+        publisher_connect.code == MoqResultCode::MoqOk
+            || publisher_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Publisher connect should succeed or timeout"
+    );
+
+    let subscriber_connect = unsafe {
+        moq_connect(
+            subscriber_client,
+            url.as_ptr(),
+            Some(connection_state_callback),
+            sub_state_ptr,
+        )
+    };
+    log_result("Subscriber connect", &subscriber_connect);
+    assert!(
+        subscriber_connect.code == MoqResultCode::MoqOk
+            || subscriber_connect.code == MoqResultCode::MoqErrorTimeout,
+        "Subscriber connect should succeed or timeout"
+    );
+
+    let publisher_connected = wait_for_condition(
+        || {
+            if let Ok(state) = publisher_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(publisher_connected, "Publisher did not enter connected state");
+
+    let subscriber_connected = wait_for_condition(
+        || {
+            if let Ok(state) = subscriber_state.lock() {
+                state.current_state == MoqConnectionState::MoqStateConnected
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(subscriber_connected, "Subscriber did not enter connected state");
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_micros();
+    let namespace = format!("moq-ffi-test/datagram-{}", timestamp);
+    let track_name = format!("track-{}", timestamp);
+
+    let namespace_c = CString::new(namespace.clone()).unwrap();
+    let track_c = CString::new(track_name.clone()).unwrap();
+
+    let announce_result = unsafe { moq_announce_namespace(publisher_client, namespace_c.as_ptr()) };
+    log_result("Announce namespace", &announce_result);
+    assert_eq!(announce_result.code, MoqResultCode::MoqOk);
+
+    let datagram_publisher = unsafe {
+        moq_create_publisher_ex(
+            publisher_client,
+            namespace_c.as_ptr(),
+            track_c.as_ptr(),
+            MoqDeliveryMode::MoqDeliveryDatagram,
+        )
+    };
+    assert!(
+        !datagram_publisher.is_null(),
+        "Datagram publisher handle should not be null"
+    );
+
+    let namespace_c_sub = CString::new(namespace.clone()).unwrap();
+    let track_c_sub = CString::new(track_name.clone()).unwrap();
+    let subscriber_handle = unsafe {
+        moq_subscribe(
+            subscriber_client,
+            namespace_c_sub.as_ptr(),
+            track_c_sub.as_ptr(),
+            Some(data_received_callback),
+            data_tracker_ptr,
+        )
+    };
+    assert!(
+        !subscriber_handle.is_null(),
+        "Subscriber handle should not be null: {:?}",
+        last_error_message()
+    );
+
+    let payloads: Vec<Vec<u8>> = vec![
+        b"ffi-dgram-object-1".to_vec(),
+        b"ffi-dgram-object-2".to_vec(),
+        b"ffi-dgram-object-3".to_vec(),
+    ];
+
+    for (index, payload) in payloads.iter().enumerate() {
+        let publish_result = unsafe {
+            moq_publish_data(
+                datagram_publisher,
+                payload.as_ptr(),
+                payload.len(),
+                MoqDeliveryMode::MoqDeliveryDatagram,
+            )
+        };
+        log_result(&format!("Publish datagram {}", index), &publish_result);
+        assert_eq!(
+            publish_result.code,
+            MoqResultCode::MoqOk,
+            "Datagram publish {} should succeed",
+            index
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let expected_count = payloads.len();
+    let received = wait_for_condition(
+        || {
+            if let Ok(tracker) = data_tracker.lock() {
+                tracker.received_count >= expected_count
+            } else {
+                false
+            }
+        },
+        TEST_TIMEOUT_SECS,
+    );
+    assert!(
+        received,
+        "Expected subscriber to receive {} datagram payloads",
+        expected_count
+    );
+
+    if let Ok(tracker) = data_tracker.lock() {
+        assert!(
+            tracker.payloads.len() >= expected_count,
+            "Subscriber did not capture all datagram payloads"
+        );
+
+        let expected_set: BTreeSet<Vec<u8>> = payloads.clone().into_iter().collect();
+        let received_set: BTreeSet<Vec<u8>> = tracker.payloads.clone().into_iter().collect();
+        assert!(
+            expected_set.is_subset(&received_set),
+            "Not all expected datagram payloads were received"
+        );
+    }
+
+    unsafe {
+        moq_subscriber_destroy(subscriber_handle);
+        moq_publisher_destroy(datagram_publisher);
+        moq_disconnect(publisher_client);
+        moq_disconnect(subscriber_client);
+        moq_client_destroy(publisher_client);
+        moq_client_destroy(subscriber_client);
+    }
+
+    println!("=== Datagram Publish/Subscribe Test Complete ===\n");
 }
 
 #[test]
