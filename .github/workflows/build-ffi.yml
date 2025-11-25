@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Install Rust 1.87.0 (MSVC)
         uses: actions-rs/toolchain@v1
@@ -42,19 +44,19 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build (Release, with_moq)
+      - name: Build (Release, with_moq_draft07)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cd moq_ffi
-          cargo build --release --features with_moq
+          cargo build --release --features with_moq_draft07
 
       - name: Run tests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cd moq_ffi
-          cargo test --features with_moq
+          cargo test --features with_moq_draft07
 
       - name: Package SDK (headers + libs + dll + pdb)
         shell: pwsh
@@ -90,6 +92,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Install dependencies
         run: |
@@ -110,15 +114,15 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build (Release, with_moq)
+      - name: Build (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq
+          cargo build --release --features with_moq_draft07
 
       - name: Run tests
         run: |
           cd moq_ffi
-          cargo test --features with_moq
+          cargo test --features with_moq_draft07
 
       - name: Package SDK (headers + libs)
         run: |
@@ -135,6 +139,44 @@ jobs:
           path: |
             artifacts/linux-x64/**
 
+  cloudflare-integration-tests:
+    name: Cloudflare Integration Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Rust 1.87.0
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.87.0
+          profile: minimal
+          target: x86_64-unknown-linux-gnu
+          override: true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            moq_ffi
+
+      - name: Run Cloudflare integration tests
+        run: |
+          cd moq_ffi
+          cargo test --features with_moq_draft07 --test cloudflare_relay_integration -- --ignored --nocapture
+        continue-on-error: true
+
   memory-leak-tests:
     name: Memory Leak Tests (Linux)
     runs-on: ubuntu-latest
@@ -145,6 +187,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Install dependencies
         run: |
@@ -196,6 +240,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Install Rust 1.87.0
         uses: actions-rs/toolchain@v1
@@ -215,15 +261,15 @@ jobs:
           workspaces: |
             moq_ffi
 
-      - name: Build x86_64 (Release, with_moq)
+      - name: Build x86_64 (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq --target x86_64-apple-darwin
+          cargo build --release --features with_moq_draft07 --target x86_64-apple-darwin
 
-      - name: Build aarch64 (Release, with_moq)
+      - name: Build aarch64 (Release, with_moq_draft07)
         run: |
           cd moq_ffi
-          cargo build --release --features with_moq --target aarch64-apple-darwin
+          cargo build --release --features with_moq_draft07 --target aarch64-apple-darwin
 
       - name: Create universal binary
         run: |
