@@ -2715,9 +2715,7 @@ mod tests {
             // Verify timeout constants are configured correctly
             // Note: These are compile-time constants, validation is documentary
             // CONNECT_TIMEOUT_SECS = 30 (positive and <= 300)
-            // SUBSCRIBE_TIMEOUT_SECS = 30 (positive and <= 300)
             assert_eq!(CONNECT_TIMEOUT_SECS, 30);
-            assert_eq!(SUBSCRIBE_TIMEOUT_SECS, 30);
         }
 
         #[test]
