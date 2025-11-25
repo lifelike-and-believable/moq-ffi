@@ -39,3 +39,4 @@ appverifier-output.log
 # OS
 .DS_Store
 Thumbs.db
+.cargo/config.toml
