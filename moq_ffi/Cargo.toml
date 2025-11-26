@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # Enable full MoQ transport integration (default: IETF Draft 14)
 with_moq = [
     "dep:moq-transport",
+    "dep:moq-catalog",
     "dep:web-transport",
     "dep:web-transport-quinn",
     "dep:tokio",
@@ -28,13 +29,15 @@ with_moq = [
     "dep:bytes",
     "dep:quinn",
     "dep:rustls",
-    "dep:rustls-native-certs"
+    "dep:rustls-native-certs",
+    "dep:serde_json"
 ]
 
 # Use IETF Draft 7 compatible version (Cloudflare production relay)
 # Note: Mutually exclusive with with_moq (which uses Draft 14)
 with_moq_draft07 = [
     "dep:moq-transport-draft07",
+    "dep:moq-catalog-draft07",
     "dep:web-transport",
     "dep:web-transport-quinn",
     "dep:tokio",
@@ -45,7 +48,8 @@ with_moq_draft07 = [
     "dep:bytes",
     "dep:quinn",
     "dep:rustls",
-    "dep:rustls-native-certs"
+    "dep:rustls-native-certs",
+    "dep:serde_json"
 ]
 
 # ───────────────────────────────────────────────
@@ -57,6 +61,11 @@ moq-transport = { version = "0.11", optional = true }
 
 # MoQ transport stack (IETF Draft 7 - Cloudflare production)
 moq-transport-draft07 = { package = "moq-transport", git = "https://github.com/cloudflare/moq-rs.git", branch = "draft-ietf-moq-transport-07", optional = true }
+
+# MoQ catalog parsing (for track discovery)
+moq-catalog = { version = "0.2", optional = true }
+moq-catalog-draft07 = { package = "moq-catalog", git = "https://github.com/cloudflare/moq-rs.git", branch = "draft-ietf-moq-transport-07", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 web-transport = { version = "0.3", optional = true }
 web-transport-quinn = { version = "0.3", optional = true }

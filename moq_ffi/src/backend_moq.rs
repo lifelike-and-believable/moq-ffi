@@ -43,6 +43,13 @@ use moq::coding::TrackNamespace;
 #[cfg(feature = "with_moq_draft07")]
 use moq::coding::Tuple as TrackNamespace;
 
+// Import the appropriate moq-catalog version based on feature flags
+#[cfg(feature = "with_moq")]
+use moq_catalog;
+
+#[cfg(feature = "with_moq_draft07")]
+use moq_catalog_draft07 as moq_catalog;
+
 // Timeout configuration for async operations
 // These timeouts prevent operations from hanging indefinitely
 const CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -117,6 +124,11 @@ struct ClientInner {
     announced_namespaces: HashMap<TrackNamespace, TracksWriter>,
     // Handle to session run task
     session_task: Option<tokio::task::JoinHandle<()>>,
+    // Callback for namespace announcements (from other publishers)
+    announce_callback: MoqTrackCallback,
+    announce_user_data: usize,
+    // Handle to announce listener task
+    announce_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[repr(C)]
@@ -146,9 +158,11 @@ struct SubscriberInner {
     track_name: String,
     data_callback: MoqDataCallback,
     user_data: usize, // Store as usize for Send safety
-    track: serve::TrackReader,
+    track: Option<serve::TrackReader>,
     // Handle to data reading task
     reader_task: Option<tokio::task::JoinHandle<()>>,
+    // Whether currently subscribed (false after unsubscribe)
+    subscribed: bool,
 }
 
 #[repr(C)]
@@ -216,6 +230,47 @@ pub type MoqTrackCallback = Option<
         user_data: *mut std::ffi::c_void,
         namespace: *const c_char,
         track_name: *const c_char,
+    ),
+>;
+
+/* ───────────────────────────────────────────────
+ * Track Discovery (Catalog-Based)
+ * ─────────────────────────────────────────────── */
+
+/// Track information from catalog
+/// 
+/// Contains metadata about a track discovered via catalog subscription.
+/// All string pointers are only valid during the callback invocation.
+/// 
+/// This struct matches the C header MoqTrackInfo exactly for FFI compatibility.
+#[repr(C)]
+pub struct MoqTrackInfo {
+    /// Track name (required, never NULL)
+    pub name: *const c_char,
+    /// Codec string (may be NULL)
+    pub codec: *const c_char,
+    /// MIME type (may be NULL)
+    pub mime_type: *const c_char,
+    /// Video width in pixels (0 if not applicable)
+    pub width: u32,
+    /// Video height in pixels (0 if not applicable)
+    pub height: u32,
+    /// Bitrate in bits per second (0 if unknown)
+    pub bitrate: u32,
+    /// Audio sample rate in Hz (0 if not applicable)
+    pub sample_rate: u32,
+    /// Language code, e.g., "en" (may be NULL)
+    pub language: *const c_char,
+}
+
+/// Catalog update callback type
+/// 
+/// Invoked when a catalog track is received with updated track information.
+pub type MoqCatalogCallback = Option<
+    unsafe extern "C" fn(
+        user_data: *mut std::ffi::c_void,
+        tracks: *const MoqTrackInfo,
+        track_count: usize,
     ),
 >;
 
@@ -307,6 +362,9 @@ pub extern "C" fn moq_client_create() -> *mut MoqClient {
                 connection_user_data: 0,
                 announced_namespaces: HashMap::new(),
                 session_task: None,
+                announce_callback: None,
+                announce_user_data: 0,
+                announce_task: None,
             })),
         };
         Box::into_raw(Box::new(client))
@@ -677,11 +735,10 @@ unsafe fn moq_connect_impl(
                 }));
             }
             
-            let result = make_error_result(
+            make_error_result(
                 MoqResultCode::MoqErrorConnectionFailed,
                 &e,
-            );
-            result
+            )
         }
     }
 }
@@ -1399,8 +1456,9 @@ unsafe fn moq_subscribe_impl(
         track_name: track_name_str.clone(),
         data_callback,
         user_data: user_data as usize,
-        track: track_reader.clone(),
+        track: Some(track_reader.clone()),
         reader_task: None,
+        subscribed: true,
     }));
 
     // Clone values for the async task
@@ -1412,7 +1470,13 @@ unsafe fn moq_subscribe_impl(
     let reader_task = RUNTIME.spawn(async move {
         let track = {
             match inner_clone.lock() {
-                Ok(inner) => inner.track.clone(),
+                Ok(inner) => match inner.track.clone() {
+                    Some(t) => t,
+                    None => {
+                        log::error!("Track reader not available (unsubscribed?)");
+                        return;
+                    }
+                },
                 Err(e) => {
                     log::error!("Failed to lock subscriber mutex: {}", e);
                     return;
@@ -1571,6 +1635,683 @@ pub unsafe extern "C" fn moq_subscriber_destroy(subscriber: *mut MoqSubscriber) 
         }
     });
     // Silently handle panics - destructor should not propagate panics
+}
+
+/// Unsubscribes from a track without destroying the subscriber handle.
+///
+/// This function stops receiving data from the track by:
+/// 1. Aborting the reader task (stops processing incoming data)
+/// 2. Dropping the track reader (signals to the relay)
+/// 3. Marking the subscriber as unsubscribed
+///
+/// After calling this function:
+/// - No more data callbacks will be invoked
+/// - `moq_is_subscribed()` will return false
+/// - The subscriber handle remains valid but inactive
+/// - Call `moq_subscriber_destroy()` to free the handle
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()` or `moq_subscribe_catalog()`
+/// - `subscriber` must not be null
+/// - This function is thread-safe
+/// - Safe to call multiple times (idempotent)
+///
+/// # Parameters
+/// - `subscriber`: Pointer to the subscriber to unsubscribe
+///
+/// # Returns
+/// - `MoqOk` on success or if already unsubscribed
+/// - `MoqErrorInvalidArgument` if subscriber is null
+#[no_mangle]
+pub unsafe extern "C" fn moq_unsubscribe(subscriber: *mut MoqSubscriber) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        if subscriber.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Subscriber is null",
+            );
+        }
+
+        let subscriber_ref = &*subscriber;
+        let inner_result = subscriber_ref.inner.lock();
+        let mut inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned in moq_unsubscribe, recovering");
+                poisoned.into_inner()
+            }
+        };
+
+        // Already unsubscribed - idempotent success
+        if !inner.subscribed {
+            log::debug!("Subscriber for {:?}/{} already unsubscribed", inner.namespace, inner.track_name);
+            return MoqResult {
+                code: MoqResultCode::MoqOk,
+                message: std::ptr::null(),
+            };
+        }
+
+        // Abort the reader task
+        if let Some(task) = inner.reader_task.take() {
+            task.abort();
+            log::debug!("Aborted reader task for {:?}/{}", inner.namespace, inner.track_name);
+        }
+
+        // Drop the track reader to signal unsubscribe to the relay
+        inner.track = None;
+
+        // Mark as unsubscribed
+        inner.subscribed = false;
+
+        log::info!("Unsubscribed from {:?}/{}", inner.namespace, inner.track_name);
+
+        MoqResult {
+            code: MoqResultCode::MoqOk,
+            message: std::ptr::null(),
+        }
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_unsubscribe");
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred in moq_unsubscribe",
+        )
+    })
+}
+
+/// Checks if the subscriber is currently subscribed to a track.
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()` or `moq_subscribe_catalog()`
+/// - `subscriber` may be null (returns false)
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `subscriber`: Pointer to the subscriber to check
+///
+/// # Returns
+/// - `true` if the subscriber is actively subscribed
+/// - `false` if subscriber is null, unsubscribed, or in an error state
+#[no_mangle]
+pub unsafe extern "C" fn moq_is_subscribed(subscriber: *const MoqSubscriber) -> bool {
+    std::panic::catch_unwind(|| {
+        if subscriber.is_null() {
+            return false;
+        }
+
+        let subscriber_ref = &*subscriber;
+        let inner_result = subscriber_ref.inner.lock();
+        let inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned in moq_is_subscribed, recovering");
+                poisoned.into_inner()
+            }
+        };
+
+        inner.subscribed
+    }).unwrap_or(false)
+}
+
+/* ───────────────────────────────────────────────
+ * Namespace Announcement Discovery
+ * ─────────────────────────────────────────────── */
+
+/// Subscribe to namespace announcements from other publishers.
+///
+/// Registers a callback to be invoked when the relay forwards ANNOUNCE messages
+/// from other publishers. This enables dynamic discovery of available namespaces
+/// without knowing them in advance.
+///
+/// **Current Limitations:**
+/// - Most relays (including Cloudflare) do not currently forward announcements
+///   to subscribers. This function prepares your application for future relay
+///   support of SUBSCRIBE_NAMESPACE or similar discovery mechanisms.
+/// - Until relay support is available, the callback will not be invoked.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `callback` may be null (to unregister the callback)
+/// - `user_data` will be passed to the callback and may be null
+/// - This function is thread-safe
+///
+/// # Parameters
+/// - `client`: Pointer to a connected MoQ client
+/// - `callback`: Callback for namespace announcements (NULL to unregister)
+/// - `user_data`: User data pointer passed to the callback
+///
+/// # Returns
+/// - `MoqOk` on success
+/// - `MoqErrorInvalidArgument` if client is null
+/// - `MoqErrorNotConnected` if client is not connected
+#[no_mangle]
+pub unsafe extern "C" fn moq_subscribe_announces(
+    client: *mut MoqClient,
+    callback: MoqTrackCallback,
+    user_data: *mut std::ffi::c_void,
+) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        moq_subscribe_announces_impl(client, callback, user_data)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_subscribe_announces");
+        make_error_result(
+            MoqResultCode::MoqErrorInternal,
+            "Internal panic occurred in moq_subscribe_announces",
+        )
+    })
+}
+
+unsafe fn moq_subscribe_announces_impl(
+    client: *mut MoqClient,
+    callback: MoqTrackCallback,
+    user_data: *mut std::ffi::c_void,
+) -> MoqResult {
+    if client.is_null() {
+        return make_error_result(
+            MoqResultCode::MoqErrorInvalidArgument,
+            "Client is null",
+        );
+    }
+
+    let client_ref = &*client;
+    let inner_result = client_ref.inner.lock();
+    let mut inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_subscribe_announces, recovering");
+            poisoned.into_inner()
+        }
+    };
+
+    // Store the callback (can be None to unregister)
+    inner.announce_callback = callback;
+    inner.announce_user_data = user_data as usize;
+
+    // If unregistering (callback is None), cancel any existing announce task
+    if callback.is_none() {
+        if let Some(task) = inner.announce_task.take() {
+            task.abort();
+            log::info!("Unregistered announce callback, cancelled listener task");
+        }
+        return make_ok_result();
+    }
+
+    // If not connected, just store the callback for when we connect
+    if !inner.connected {
+        log::info!("Announce callback registered (will activate on connect)");
+        return make_ok_result();
+    }
+
+    // If already have an announce task running, it will pick up the new callback
+    if inner.announce_task.is_some() {
+        log::info!("Updated announce callback (existing listener active)");
+        return make_ok_result();
+    }
+
+    // Get the subscriber to listen for announces
+    let subscriber = match inner.subscriber.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            log::warn!("No subscriber available for announce listening");
+            return make_ok_result(); // Not an error, just no subscriber role
+        }
+    };
+
+    // Clone what we need for the async task
+    let client_inner = client_ref.inner.clone();
+
+    // Spawn task to listen for announces
+    let announce_task = RUNTIME.spawn(async move {
+        let mut subscriber = subscriber;
+        
+        log::info!("Starting announce listener task");
+        
+        // Listen for announced namespaces
+        // Note: Most relays don't forward announces to subscribers yet,
+        // so this loop may never receive any announcements.
+        while let Some(mut announced) = subscriber.announced().await {
+            let namespace = announced.namespace.to_utf8_path();
+            log::info!("Received namespace announcement: {}", namespace);
+
+            // Get the callback from client inner
+            let (callback, user_data) = {
+                let inner_result = client_inner.lock();
+                let inner = match inner_result {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        log::warn!("Mutex poisoned in announce listener, recovering");
+                        poisoned.into_inner()
+                    }
+                };
+                (inner.announce_callback, inner.announce_user_data)
+            };
+
+            // Invoke callback if registered
+            if let Some(cb) = callback {
+                let namespace_cstr = match std::ffi::CString::new(namespace.clone()) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log::error!("Invalid namespace string (contains null byte)");
+                        continue;
+                    }
+                };
+
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cb(
+                        user_data as *mut std::ffi::c_void,
+                        namespace_cstr.as_ptr(),
+                        std::ptr::null(), // track_name is null for namespace announcements
+                    );
+                }));
+            }
+
+            // Accept the announcement (required by protocol)
+            if let Err(e) = announced.ok() {
+                log::warn!("Failed to accept announcement for {}: {}", namespace, e);
+            }
+        }
+
+        log::info!("Announce listener task ended");
+    });
+
+    inner.announce_task = Some(announce_task);
+    log::info!("Announce callback registered and listener started");
+
+    make_ok_result()
+}
+
+/* ───────────────────────────────────────────────
+ * Catalog Subscription (Track Discovery)
+ * ─────────────────────────────────────────────── */
+
+/// Subscribe to a catalog track for automatic track discovery.
+/// 
+/// The catalog track should publish JSON data conforming to the MoQ catalog format
+/// (draft-ietf-moq-catalogformat). When catalog updates are received, the callback
+/// is invoked with the parsed track list.
+/// 
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `namespace` must be a valid null-terminated C string
+/// - `catalog_track_name` must be a valid null-terminated C string
+/// - None of the above may be null
+/// - `callback` may be null (no callback will be invoked)
+/// - `user_data` will be passed to the callback and may be null
+/// - This function is thread-safe
+/// 
+/// # Parameters
+/// - `client`: Pointer to a connected MoQ client
+/// - `namespace`: Namespace containing the catalog track
+/// - `catalog_track_name`: Name of the catalog track (e.g., "catalog")
+/// - `callback`: Optional callback for track list updates
+/// - `user_data`: User data pointer passed to the callback
+/// 
+/// # Returns
+/// Subscriber handle for the catalog, or NULL on failure.
+/// The returned subscriber must be destroyed with `moq_subscriber_destroy()`.
+#[no_mangle]
+pub unsafe extern "C" fn moq_subscribe_catalog(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    catalog_track_name: *const c_char,
+    callback: MoqCatalogCallback,
+    user_data: *mut std::ffi::c_void,
+) -> *mut MoqSubscriber {
+    std::panic::catch_unwind(|| {
+        moq_subscribe_catalog_impl(client, namespace, catalog_track_name, callback, user_data)
+    }).unwrap_or_else(|_| {
+        log::error!("Panic in moq_subscribe_catalog");
+        set_last_error("Internal panic occurred in moq_subscribe_catalog".to_string());
+        std::ptr::null_mut()
+    })
+}
+
+unsafe fn moq_subscribe_catalog_impl(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    catalog_track_name: *const c_char,
+    callback: MoqCatalogCallback,
+    user_data: *mut std::ffi::c_void,
+) -> *mut MoqSubscriber {
+    // Validate arguments
+    if client.is_null() || namespace.is_null() || catalog_track_name.is_null() {
+        set_last_error("Client, namespace, or catalog_track_name is null".to_string());
+        return std::ptr::null_mut();
+    }
+
+    let namespace_str = match CStr::from_ptr(namespace).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("Invalid UTF-8 in namespace".to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    let track_name_str = match CStr::from_ptr(catalog_track_name).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("Invalid UTF-8 in catalog_track_name".to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    let client_ref = &*client;
+    let inner_result = client_ref.inner.lock();
+    let inner = match inner_result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Mutex poisoned in moq_subscribe_catalog, recovering");
+            poisoned.into_inner()
+        }
+    };
+
+    if !inner.connected {
+        set_last_error("Not connected to MoQ server".to_string());
+        return std::ptr::null_mut();
+    }
+
+    // Parse namespace
+    let track_namespace = TrackNamespace::from_utf8_path(&namespace_str);
+
+    // Get subscriber (we need to clone it to use in async context)
+    let subscriber_impl = match inner.subscriber.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            set_last_error("Subscriber not available".to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    drop(inner);
+
+    // Create track subscription using the same pattern as moq_subscribe
+    let tracks = Tracks::new(track_namespace.clone());
+    let (mut tracks_writer, _tracks_request, mut tracks_reader) = tracks.produce();
+    
+    // Create track writer for the catalog track
+    let track_writer = match tracks_writer.create(&track_name_str) {
+        Some(tw) => tw,
+        None => {
+            set_last_error("Failed to create track writer for catalog (tracks closed)".to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Clone subscriber for the async task
+    let mut subscriber_for_task = subscriber_impl.clone();
+    let track_name_for_task = track_name_str.clone();
+    
+    // Spawn task to send subscribe request to relay
+    RUNTIME.spawn(async move {
+        if let Err(err) = subscriber_for_task.subscribe(track_writer).await {
+            log::warn!("Failed to subscribe to catalog track {}: {}", track_name_for_task, err);
+        }
+    });
+
+    // Get the track reader from TracksReader
+    let track_reader = match tracks_reader.subscribe(&track_name_str) {
+        Some(tr) => tr,
+        None => {
+            set_last_error("Failed to get track reader for catalog (no track available)".to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Create subscriber with catalog-specific data callback
+    let subscriber_inner = Arc::new(Mutex::new(SubscriberInner {
+        namespace: track_namespace.clone(),
+        track_name: track_name_str.clone(),
+        data_callback: None, // We use catalog callback instead
+        user_data: user_data as usize,
+        track: Some(track_reader.clone()),
+        reader_task: None,
+        subscribed: true,
+    }));
+
+    // Clone values for the async task
+    let track_namespace_log = track_namespace.clone();
+    let track_name_log = track_name_str.clone();
+    let user_data_usize = user_data as usize;
+    
+    // Spawn task to read catalog data and parse it
+    let inner_clone = subscriber_inner.clone();
+    let reader_task = RUNTIME.spawn(async move {
+        let track = {
+            match inner_clone.lock() {
+                Ok(inner) => match inner.track.clone() {
+                    Some(t) => t,
+                    None => {
+                        log::error!("Track reader not available (unsubscribed?)");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    log::error!("Failed to lock subscriber mutex: {}", e);
+                    return;
+                }
+            }
+        };
+
+        log::debug!("Starting catalog reader for {:?}/{}", track_namespace_log, track_name_log);
+
+        // Get the mode - following moq-sub pattern
+        let mode_result = track.mode().await;
+        match mode_result {
+            Ok(mode) => {
+                use moq::serve::TrackReaderMode;
+                
+                match mode {
+                    TrackReaderMode::Subgroups(mut groups) => {
+                        log::debug!("Catalog {:?}/{} using Subgroups mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(mut group)) = groups.next().await {
+                            while let Ok(Some(mut object)) = group.next().await {
+                                // Read the complete catalog object
+                                let mut buf = Vec::with_capacity(object.size);
+                                while let Ok(Some(chunk)) = object.read().await {
+                                    buf.extend_from_slice(&chunk);
+                                }
+                                
+                                if !buf.is_empty() {
+                                    // Parse catalog and invoke callback
+                                    parse_and_invoke_catalog_callback(
+                                        &buf,
+                                        callback,
+                                        user_data_usize,
+                                        &track_namespace_log,
+                                        &track_name_log,
+                                    );
+                                }
+                            }
+                        }
+                        log::debug!("Catalog {:?}/{} subgroups ended", track_namespace_log, track_name_log);
+                    }
+                    TrackReaderMode::Stream(mut stream) => {
+                        log::debug!("Catalog {:?}/{} using Stream mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(mut group)) = stream.next().await {
+                            while let Ok(Some(mut object)) = group.next().await {
+                                let mut buf = Vec::new();
+                                while let Ok(Some(chunk)) = object.read().await {
+                                    buf.extend_from_slice(&chunk);
+                                }
+                                
+                                if !buf.is_empty() {
+                                    parse_and_invoke_catalog_callback(
+                                        &buf,
+                                        callback,
+                                        user_data_usize,
+                                        &track_namespace_log,
+                                        &track_name_log,
+                                    );
+                                }
+                            }
+                        }
+                        log::debug!("Catalog {:?}/{} stream ended", track_namespace_log, track_name_log);
+                    }
+                    TrackReaderMode::Datagrams(mut datagrams) => {
+                        log::debug!("Catalog {:?}/{} using Datagrams mode", track_namespace_log, track_name_log);
+                        while let Ok(Some(datagram)) = datagrams.read().await {
+                            let buf = datagram.payload.to_vec();
+                            if !buf.is_empty() {
+                                parse_and_invoke_catalog_callback(
+                                    &buf,
+                                    callback,
+                                    user_data_usize,
+                                    &track_namespace_log,
+                                    &track_name_log,
+                                );
+                            }
+                        }
+                        log::debug!("Catalog {:?}/{} datagrams ended", track_namespace_log, track_name_log);
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to get track mode for catalog {:?}/{}: {}", track_namespace_log, track_name_log, e);
+            }
+        }
+    });
+
+    // Store reader task
+    {
+        let inner_result = subscriber_inner.lock();
+        let mut inner = match inner_result {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("Mutex poisoned when storing reader task, recovering");
+                poisoned.into_inner()
+            }
+        };
+        inner.reader_task = Some(reader_task);
+    }
+
+    let subscriber = MoqSubscriber {
+        inner: subscriber_inner,
+    };
+
+    log::info!("Subscribed to catalog {}/{}", namespace_str, track_name_str);
+    Box::into_raw(Box::new(subscriber))
+}
+
+/// Helper function to parse catalog JSON and invoke the callback.
+/// 
+/// This function handles:
+/// - JSON parsing using serde_json and moq_catalog::Root
+/// - Converting moq_catalog::Track to MoqTrackInfo for FFI
+/// - String allocation for C-compatible strings
+/// - Callback invocation with panic protection
+/// - Proper cleanup of allocated strings
+fn parse_and_invoke_catalog_callback(
+    data: &[u8],
+    callback: MoqCatalogCallback,
+    user_data: usize,
+    namespace: &TrackNamespace,
+    track_name: &str,
+) {
+    // Skip if no callback
+    let callback_fn = match callback {
+        Some(cb) => cb,
+        None => {
+            log::debug!("No catalog callback set, skipping");
+            return;
+        }
+    };
+
+    // Try to parse as UTF-8 string first
+    let json_str = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("Catalog data for {:?}/{} is not valid UTF-8: {}", namespace, track_name, e);
+            return;
+        }
+    };
+
+    // Parse catalog JSON using moq_catalog crate
+    let catalog: moq_catalog::Root = match serde_json::from_str(json_str) {
+        Ok(cat) => cat,
+        Err(e) => {
+            log::warn!("Failed to parse catalog JSON for {:?}/{}: {}", namespace, track_name, e);
+            log::debug!("Catalog JSON (first 500 chars): {:.500}", json_str);
+            return;
+        }
+    };
+
+    log::debug!(
+        "Parsed catalog v{} with {} tracks for {:?}/{}",
+        catalog.version,
+        catalog.tracks.len(),
+        namespace,
+        track_name
+    );
+
+    // Convert tracks to MoqTrackInfo structs for FFI
+    // We need to keep CStrings alive until after the callback
+    let mut c_strings: Vec<CString> = Vec::new();
+    let mut track_infos: Vec<MoqTrackInfo> = Vec::with_capacity(catalog.tracks.len());
+
+    for track in &catalog.tracks {
+        // Allocate C strings - we'll clean these up after the callback
+        let name_cstr = CString::new(track.name.as_str())
+            .unwrap_or_else(|_| CString::new("").unwrap());
+        let name_ptr = name_cstr.as_ptr();
+        c_strings.push(name_cstr);
+
+        let codec_ptr = if let Some(ref codec) = track.selection_params.codec {
+            let cstr = CString::new(codec.as_str())
+                .unwrap_or_else(|_| CString::new("").unwrap());
+            let ptr = cstr.as_ptr();
+            c_strings.push(cstr);
+            ptr
+        } else {
+            std::ptr::null()
+        };
+
+        let mime_type_ptr = if let Some(ref mime) = track.selection_params.mime_type {
+            let cstr = CString::new(mime.as_str())
+                .unwrap_or_else(|_| CString::new("").unwrap());
+            let ptr = cstr.as_ptr();
+            c_strings.push(cstr);
+            ptr
+        } else {
+            std::ptr::null()
+        };
+
+        let language_ptr = if let Some(ref lang) = track.selection_params.language {
+            let cstr = CString::new(lang.as_str())
+                .unwrap_or_else(|_| CString::new("").unwrap());
+            let ptr = cstr.as_ptr();
+            c_strings.push(cstr);
+            ptr
+        } else {
+            std::ptr::null()
+        };
+
+        track_infos.push(MoqTrackInfo {
+            name: name_ptr,
+            codec: codec_ptr,
+            mime_type: mime_type_ptr,
+            width: track.selection_params.width.unwrap_or(0),
+            height: track.selection_params.height.unwrap_or(0),
+            bitrate: track.selection_params.bitrate.unwrap_or(0),
+            sample_rate: track.selection_params.samplerate.unwrap_or(0),
+            language: language_ptr,
+        });
+    }
+
+    // Invoke callback with panic protection
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        log::debug!("Invoking catalog callback with {} tracks", track_infos.len());
+        // Safety: callback_fn is a C function pointer, user_data is provided by caller
+        unsafe {
+            callback_fn(
+                user_data as *mut std::ffi::c_void,
+                if track_infos.is_empty() { std::ptr::null() } else { track_infos.as_ptr() },
+                track_infos.len(),
+            );
+        }
+    }));
+
+    // c_strings will be dropped here, freeing the memory
+    // This is safe because the callback should have copied any data it needs
 }
 
 /* ───────────────────────────────────────────────
@@ -2057,6 +2798,57 @@ mod tests {
         fn test_free_str_with_null_is_safe() {
             // Should not crash
             unsafe { moq_free_str(std::ptr::null()); }
+        }
+
+        #[test]
+        fn test_unsubscribe_with_null_subscriber() {
+            let result = unsafe { moq_unsubscribe(std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_is_subscribed_with_null_subscriber() {
+            let subscribed = unsafe { moq_is_subscribed(std::ptr::null()) };
+            assert!(!subscribed);
+        }
+
+        #[test]
+        fn test_subscribe_announces_with_null_client() {
+            let result = unsafe { moq_subscribe_announces(std::ptr::null_mut(), None, std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_subscribe_announces_succeeds() {
+            let client = moq_client_create();
+            // Can register callback even when not connected
+            let result = unsafe { moq_subscribe_announces(client, None, std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_announces_with_callback() {
+            extern "C" fn announce_callback(
+                _user_data: *mut std::ffi::c_void,
+                _namespace: *const c_char,
+                _track_name: *const c_char,
+            ) {
+                // Callback for announce notifications
+            }
+
+            let client = moq_client_create();
+            let result = unsafe { 
+                moq_subscribe_announces(client, Some(announce_callback), std::ptr::null_mut()) 
+            };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { moq_client_destroy(client); }
         }
     }
 

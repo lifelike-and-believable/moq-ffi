@@ -86,6 +86,47 @@ pub type MoqTrackCallback = Option<
 >;
 
 /* ───────────────────────────────────────────────
+ * Track Discovery (Catalog-Based)
+ * ─────────────────────────────────────────────── */
+
+/// Track information from catalog (stub implementation)
+/// 
+/// Contains metadata about a track discovered via catalog subscription.
+/// All string pointers are only valid during the callback invocation.
+/// 
+/// This struct matches the C header MoqTrackInfo exactly for FFI compatibility.
+#[repr(C)]
+pub struct MoqTrackInfo {
+    /// Track name (required, never NULL)
+    pub name: *const c_char,
+    /// Codec string (may be NULL)
+    pub codec: *const c_char,
+    /// MIME type (may be NULL)
+    pub mime_type: *const c_char,
+    /// Video width in pixels (0 if not applicable)
+    pub width: u32,
+    /// Video height in pixels (0 if not applicable)
+    pub height: u32,
+    /// Bitrate in bits per second (0 if unknown)
+    pub bitrate: u32,
+    /// Audio sample rate in Hz (0 if not applicable)
+    pub sample_rate: u32,
+    /// Language code, e.g., "en" (may be NULL)
+    pub language: *const c_char,
+}
+
+/// Catalog update callback type (stub implementation)
+/// 
+/// Invoked when a catalog track is received with updated track information.
+pub type MoqCatalogCallback = Option<
+    unsafe extern "C" fn(
+        user_data: *mut std::ffi::c_void,
+        tracks: *const MoqTrackInfo,
+        track_count: usize,
+    ),
+>;
+
+/* ───────────────────────────────────────────────
  * Helper Functions
  * ─────────────────────────────────────────────── */
 
@@ -399,6 +440,132 @@ pub unsafe extern "C" fn moq_subscriber_destroy(subscriber: *mut MoqSubscriber) 
             let _ = Box::from_raw(subscriber);
         }
     });
+}
+
+/// Unsubscribes from a track without destroying the subscriber handle (stub implementation).
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()`
+/// - `subscriber` must not be null
+/// - This function is thread-safe
+/// - Safe to call multiple times (idempotent)
+///
+/// # Returns
+/// - `MoqOk` on success or if already unsubscribed
+/// - `MoqErrorInvalidArgument` if subscriber is null
+#[no_mangle]
+pub unsafe extern "C" fn moq_unsubscribe(subscriber: *mut MoqSubscriber) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        if subscriber.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Subscriber is null",
+            );
+        }
+
+        // Stub: subscriber handles don't exist in stub mode, but return OK for consistency
+        make_ok_result()
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
+}
+
+/// Checks if the subscriber is currently subscribed to a track (stub implementation - always returns false).
+///
+/// # Safety
+/// - `subscriber` must be a valid pointer returned from `moq_subscribe()`
+/// - `subscriber` may be null (returns false)
+/// - This function is thread-safe
+///
+/// # Returns
+/// - Always returns false in stub mode (no active subscriptions possible)
+#[no_mangle]
+pub unsafe extern "C" fn moq_is_subscribed(subscriber: *const MoqSubscriber) -> bool {
+    std::panic::catch_unwind(|| {
+        if subscriber.is_null() {
+            return false;
+        }
+        false // Stub: never subscribed
+    }).unwrap_or(false)
+}
+
+/* ───────────────────────────────────────────────
+ * Namespace Announcement Discovery
+ * ─────────────────────────────────────────────── */
+
+/// Subscribe to namespace announcements from other publishers (stub implementation).
+///
+/// In the stub backend, this function registers the callback but will never invoke it
+/// since there's no actual MoQ transport to receive announcements from.
+///
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `client` must not be null
+/// - `callback` may be null (to unregister the callback)
+/// - `user_data` will be passed to the callback and may be null
+/// - This function is thread-safe
+///
+/// # Returns
+/// - `MoqOk` on success (callback registered but will never be invoked)
+/// - `MoqErrorInvalidArgument` if client is null
+#[no_mangle]
+pub unsafe extern "C" fn moq_subscribe_announces(
+    client: *mut MoqClient,
+    _callback: MoqTrackCallback,
+    _user_data: *mut std::ffi::c_void,
+) -> MoqResult {
+    std::panic::catch_unwind(|| {
+        if client.is_null() {
+            return make_error_result(
+                MoqResultCode::MoqErrorInvalidArgument,
+                "Client is null",
+            );
+        }
+
+        // Stub: Accept the registration but never invoke the callback
+        // This allows applications to future-proof their code
+        make_ok_result()
+    }).unwrap_or_else(|_| {
+        make_error_result(MoqResultCode::MoqErrorInternal, "Internal panic occurred")
+    })
+}
+
+/* ───────────────────────────────────────────────
+ * Catalog Subscription (Track Discovery)
+ * ─────────────────────────────────────────────── */
+
+/// Subscribe to a catalog track for automatic track discovery (stub implementation - always returns null).
+/// 
+/// The catalog track should publish JSON data conforming to the MoQ catalog format
+/// (draft-ietf-moq-catalogformat). When catalog updates are received, the callback
+/// is invoked with the parsed track list.
+/// 
+/// # Safety
+/// - `client` must be a valid pointer returned from `moq_client_create()`
+/// - `namespace` must be a valid null-terminated C string
+/// - `catalog_track_name` must be a valid null-terminated C string
+/// - None of the above may be null
+/// - `callback` may be null (no callback will be invoked)
+/// - `user_data` will be passed to the callback and may be null
+/// - This function is thread-safe
+/// 
+/// # Returns
+/// Always returns NULL in stub build - MoQ transport not enabled.
+#[no_mangle]
+pub unsafe extern "C" fn moq_subscribe_catalog(
+    client: *mut MoqClient,
+    namespace: *const c_char,
+    catalog_track_name: *const c_char,
+    _callback: MoqCatalogCallback,
+    _user_data: *mut std::ffi::c_void,
+) -> *mut MoqSubscriber {
+    std::panic::catch_unwind(|| {
+        if client.is_null() || namespace.is_null() || catalog_track_name.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        std::ptr::null_mut() // Stub: can't create catalog subscriber
+    }).unwrap_or(std::ptr::null_mut())
 }
 
 /* ───────────────────────────────────────────────
@@ -775,9 +942,133 @@ mod tests {
         }
 
         #[test]
+        fn test_unsubscribe_with_null_subscriber() {
+            let result = unsafe { moq_unsubscribe(std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
+        fn test_is_subscribed_with_null_subscriber() {
+            let subscribed = unsafe { moq_is_subscribed(std::ptr::null()) };
+            assert!(!subscribed);
+        }
+
+        #[test]
+        fn test_subscribe_announces_with_null_client() {
+            let result = unsafe { moq_subscribe_announces(std::ptr::null_mut(), None, std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqErrorInvalidArgument);
+            assert!(!result.message.is_null());
+            unsafe { moq_free_str(result.message); }
+        }
+
+        #[test]
         fn test_free_str_with_null_is_safe() {
             // Should not crash
             unsafe { moq_free_str(std::ptr::null()); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Namespace Announcement Tests
+     * ─────────────────────────────────────────────── */
+
+    mod announce_discovery {
+        use super::*;
+
+        #[test]
+        fn test_subscribe_announces_succeeds_in_stub() {
+            let client = moq_client_create();
+            let result = unsafe { moq_subscribe_announces(client, None, std::ptr::null_mut()) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_announces_with_callback() {
+            extern "C" fn announce_callback(
+                _user_data: *mut std::ffi::c_void,
+                _namespace: *const c_char,
+                _track_name: *const c_char,
+            ) {
+                // In stub mode, this callback will never be invoked
+            }
+
+            let client = moq_client_create();
+            let result = unsafe { 
+                moq_subscribe_announces(client, Some(announce_callback), std::ptr::null_mut()) 
+            };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { moq_client_destroy(client); }
+        }
+
+        #[test]
+        fn test_subscribe_announces_unregister() {
+            extern "C" fn announce_callback(
+                _user_data: *mut std::ffi::c_void,
+                _namespace: *const c_char,
+                _track_name: *const c_char,
+            ) {}
+
+            let client = moq_client_create();
+            
+            // Register callback
+            let result = unsafe { 
+                moq_subscribe_announces(client, Some(announce_callback), std::ptr::null_mut()) 
+            };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            
+            // Unregister by passing None
+            let result = unsafe { 
+                moq_subscribe_announces(client, None, std::ptr::null_mut()) 
+            };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            
+            unsafe { moq_client_destroy(client); }
+        }
+    }
+
+    /* ───────────────────────────────────────────────
+     * Subscription State Tests
+     * ─────────────────────────────────────────────── */
+
+    mod subscription_state {
+        use super::*;
+
+        #[test]
+        fn test_unsubscribe_with_fake_subscriber() {
+            // In stub mode, we can create a fake subscriber to test the function
+            let fake_subscriber = Box::into_raw(Box::new(MoqSubscriber { _dummy: 0 }));
+            let result = unsafe { moq_unsubscribe(fake_subscriber) };
+            assert_eq!(result.code, MoqResultCode::MoqOk);
+            assert!(result.message.is_null());
+            unsafe { let _ = Box::from_raw(fake_subscriber); } // Clean up
+        }
+
+        #[test]
+        fn test_unsubscribe_is_idempotent() {
+            // Calling unsubscribe multiple times should be safe
+            let fake_subscriber = Box::into_raw(Box::new(MoqSubscriber { _dummy: 0 }));
+            
+            let result1 = unsafe { moq_unsubscribe(fake_subscriber) };
+            assert_eq!(result1.code, MoqResultCode::MoqOk);
+            
+            let result2 = unsafe { moq_unsubscribe(fake_subscriber) };
+            assert_eq!(result2.code, MoqResultCode::MoqOk);
+            
+            unsafe { let _ = Box::from_raw(fake_subscriber); }
+        }
+
+        #[test]
+        fn test_is_subscribed_returns_false_in_stub() {
+            // In stub mode, subscribers are never really subscribed
+            let fake_subscriber = Box::into_raw(Box::new(MoqSubscriber { _dummy: 0 }));
+            let subscribed = unsafe { moq_is_subscribed(fake_subscriber) };
+            assert!(!subscribed); // Stub always returns false
+            unsafe { let _ = Box::from_raw(fake_subscriber); }
         }
     }
 

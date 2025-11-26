@@ -117,6 +117,42 @@ typedef void (*MoqDataCallback)(void* user_data, const uint8_t* data, size_t dat
 typedef void (*MoqTrackCallback)(void* user_data, const char* namespace_str, const char* track_name);
 
 /* ───────────────────────────────────────────────
+ * Track Discovery (Catalog-Based)
+ * ─────────────────────────────────────────────── */
+
+/**
+ * Track information from catalog
+ * 
+ * Contains metadata about a track discovered via catalog subscription.
+ * All string pointers are only valid during the callback invocation.
+ */
+typedef struct {
+    const char* name;           /**< Track name (required, never NULL) */
+    const char* codec;          /**< Codec string (may be NULL) */
+    const char* mime_type;      /**< MIME type (may be NULL) */
+    uint32_t width;             /**< Video width in pixels (0 if not applicable) */
+    uint32_t height;            /**< Video height in pixels (0 if not applicable) */
+    uint32_t bitrate;           /**< Bitrate in bits per second (0 if unknown) */
+    uint32_t sample_rate;       /**< Audio sample rate in Hz (0 if not applicable) */
+    const char* language;       /**< Language code, e.g., "en" (may be NULL) */
+} MoqTrackInfo;
+
+/**
+ * Catalog update callback
+ * 
+ * Invoked when a catalog track is received with updated track information.
+ * 
+ * @param user_data User-provided context pointer
+ * @param tracks Array of track info structures
+ * @param track_count Number of tracks in the array
+ * 
+ * @note The tracks array and all strings within are only valid during the callback.
+ *       Copy any data you need to retain before returning.
+ * @note This callback may be invoked from a background thread.
+ */
+typedef void (*MoqCatalogCallback)(void* user_data, const MoqTrackInfo* tracks, size_t track_count);
+
+/* ───────────────────────────────────────────────
  * Initialization
  * ─────────────────────────────────────────────── */
 
@@ -290,6 +326,164 @@ MOQ_API MoqSubscriber* moq_subscribe(
  * @param subscriber Subscriber handle
  */
 MOQ_API void moq_subscriber_destroy(MoqSubscriber* subscriber);
+
+/**
+ * Unsubscribe from a track without destroying the subscriber handle
+ * 
+ * This function stops receiving data from the track by:
+ * - Aborting the reader task (stops processing incoming data)
+ * - Dropping the track reader (signals to the relay)
+ * - Marking the subscriber as unsubscribed
+ * 
+ * After calling this function:
+ * - No more data callbacks will be invoked
+ * - moq_is_subscribed() will return false
+ * - The subscriber handle remains valid but inactive
+ * - Call moq_subscriber_destroy() to free the handle
+ * 
+ * @param subscriber Subscriber handle
+ * @return MOQ_OK on success or if already unsubscribed,
+ *         MOQ_ERROR_INVALID_ARGUMENT if subscriber is null
+ * 
+ * @note Thread-safe
+ * @note Idempotent: safe to call multiple times
+ * @note Available since: v0.2.0
+ * 
+ * Example usage:
+ * @code
+ *   MoqSubscriber* sub = moq_subscribe(client, "ns", "track", callback, NULL);
+ *   // ... receive data ...
+ *   
+ *   // Stop receiving without destroying handle
+ *   MoqResult result = moq_unsubscribe(sub);
+ *   if (result.code == MOQ_OK) {
+ *       // No longer receiving data
+ *       // Can still query moq_is_subscribed(sub) == false
+ *   }
+ *   
+ *   // When done, destroy the handle
+ *   moq_subscriber_destroy(sub);
+ * @endcode
+ */
+MOQ_API MoqResult moq_unsubscribe(MoqSubscriber* subscriber);
+
+/**
+ * Check if the subscriber is currently subscribed to a track
+ * 
+ * @param subscriber Subscriber handle
+ * @return true if actively subscribed, false if null/unsubscribed/error
+ * 
+ * @note Thread-safe
+ * @note Available since: v0.2.0
+ */
+MOQ_API bool moq_is_subscribed(const MoqSubscriber* subscriber);
+
+/* ───────────────────────────────────────────────
+ * Namespace Announcement Discovery
+ * ─────────────────────────────────────────────── */
+
+/**
+ * Subscribe to namespace announcements from other publishers
+ * 
+ * Registers a callback to be invoked when the relay forwards ANNOUNCE messages
+ * from other publishers. This enables dynamic discovery of available namespaces
+ * without knowing them in advance.
+ * 
+ * **Current Limitations:**
+ * - Most relays (including Cloudflare) do not currently forward announcements
+ *   to subscribers. This function prepares your application for future relay
+ *   support of SUBSCRIBE_NAMESPACE or similar discovery mechanisms.
+ * - Until relay support is available, the callback will not be invoked.
+ * 
+ * **Future Behavior (when relay support is available):**
+ * - Callback will be invoked for each namespace announced by other publishers
+ * - namespace_str: The announced namespace path (e.g., "mocap/performer1")
+ * - track_name: Will be NULL for namespace-level announcements
+ * 
+ * @param client Client handle (must be connected)
+ * @param callback Callback for namespace announcements (may be NULL to unregister)
+ * @param user_data User context pointer passed to callback
+ * @return MOQ_OK on success, error code on failure
+ * 
+ * @note Thread-safe
+ * @note Callback may be invoked from a background thread
+ * @note Call with callback=NULL to stop receiving announcements
+ * @note Available since: v0.2.0
+ * 
+ * Example usage:
+ * @code
+ *   void on_namespace_announced(void* ctx, const char* ns, const char* track) {
+ *       printf("Publisher available: %s\n", ns);
+ *       // Now you can subscribe to tracks in this namespace
+ *   }
+ *   
+ *   // Register for announcements (future-proofing)
+ *   moq_subscribe_announces(client, on_namespace_announced, user_data);
+ *   
+ *   // For now, also use manual namespace specification
+ *   // since relays don't forward announcements yet
+ * @endcode
+ */
+MOQ_API MoqResult moq_subscribe_announces(
+    MoqClient* client,
+    MoqTrackCallback callback,
+    void* user_data
+);
+
+/* ───────────────────────────────────────────────
+ * Catalog Subscription (Track Discovery)
+ * ─────────────────────────────────────────────── */
+
+/**
+ * Subscribe to a catalog track for automatic track discovery
+ * 
+ * The catalog track should publish JSON data conforming to the MoQ catalog format
+ * (draft-ietf-moq-catalogformat). When catalog updates are received, the callback
+ * is invoked with the parsed track list.
+ * 
+ * This enables applications to discover dynamically created tracks within a
+ * known namespace without needing to know track names in advance.
+ * 
+ * Common catalog track names:
+ * - "catalog" or "catalog.json" (convention for JSON catalogs)
+ * - The init segment track name for CMAF workflows
+ * 
+ * @param client Client handle (must be connected)
+ * @param namespace_str Namespace containing the catalog track
+ * @param catalog_track_name Name of the catalog track (e.g., "catalog")
+ * @param callback Callback for track list updates (may be NULL)
+ * @param user_data User context pointer passed to callback
+ * @return Subscriber handle for the catalog, or NULL on failure
+ * 
+ * @note Thread-safe
+ * @note Callback may be invoked from a background thread; ensure thread-safe access
+ *       to any shared data within the callback
+ * @note If callback is NULL, the catalog is subscribed but no notifications are sent
+ * 
+ * Example usage:
+ * @code
+ *   void on_tracks_updated(void* ctx, const MoqTrackInfo* tracks, size_t count) {
+ *       for (size_t i = 0; i < count; i++) {
+ *           printf("Track: %s (codec: %s)\n", 
+ *                  tracks[i].name, 
+ *                  tracks[i].codec ? tracks[i].codec : "unknown");
+ *       }
+ *   }
+ *   
+ *   MoqSubscriber* catalog = moq_subscribe_catalog(
+ *       client, "my-broadcast", "catalog", on_tracks_updated, NULL);
+ *   if (catalog) {
+ *       // Catalog subscription active, callback will fire on updates
+ *   }
+ * @endcode
+ */
+MOQ_API MoqSubscriber* moq_subscribe_catalog(
+    MoqClient* client,
+    const char* namespace_str,
+    const char* catalog_track_name,
+    MoqCatalogCallback callback,
+    void* user_data
+);
 
 /* ───────────────────────────────────────────────
  * Utilities
