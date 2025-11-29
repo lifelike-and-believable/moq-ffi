@@ -198,7 +198,7 @@ void test_track_announce_subscription() {
         atomic<int> count{0};
     } announce_ctx;
 
-    auto announce_callback = [](void* user_data, const char* ns, const char* track) {
+    MoqAnnounceCallback announce_callback = +[](void* user_data, const char* ns, const char* track) {
         AnnounceContext* ctx = (AnnounceContext*)user_data;
         ctx->count++;
         cout << "[ANNOUNCE] Namespace: " << (ns ? ns : "null")

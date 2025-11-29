@@ -226,7 +226,6 @@ jobs:
         run: |
           cd moq_ffi/c_tests/build
           ctest --output-on-failure
-        continue-on-error: true
 
       - name: Upload C/C++ test results
         if: always()
@@ -285,7 +284,6 @@ jobs:
         run: |
           cd moq_ffi/c_tests/build
           ctest -C Release --output-on-failure
-        continue-on-error: true
 
       - name: Upload C/C++ test results
         if: always()
@@ -339,7 +337,6 @@ jobs:
         run: |
           cd moq_ffi/c_tests/build
           ctest --output-on-failure
-        continue-on-error: true
 
       - name: Upload C/C++ test results
         if: always()

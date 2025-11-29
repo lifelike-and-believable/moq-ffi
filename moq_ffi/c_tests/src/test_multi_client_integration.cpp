@@ -237,7 +237,7 @@ void test_cross_client_pubsub() {
     vector<SubDataContext> sub_data_contexts(NUM_SUBSCRIBERS);
     vector<MoqSubscriber*> subscribers;
 
-    auto sub_callback = [](void* user_data, const uint8_t* data, size_t len) {
+    MoqDataCallback sub_callback = +[](void* user_data, const uint8_t* data, size_t len) {
         SubDataContext* ctx = (SubDataContext*)user_data;
         ctx->packet_count++;
         cout << "[" << ctx->subscriber_id << "] Received " << len << " bytes "
