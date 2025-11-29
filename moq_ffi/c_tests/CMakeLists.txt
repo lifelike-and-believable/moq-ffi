@@ -15,14 +15,19 @@ if(NOT DEFINED MOQFFI_INCLUDE_DIR)
     set(MOQFFI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 endif()
 
-# Platform-specific library name
+# Platform-specific library name and path
 if(WIN32)
     set(MOQFFI_LIB_NAME "moq_ffi.dll.lib")
     set(MOQFFI_DLL_NAME "moq_ffi.dll")
+    set(MOQFFI_IMPORT_LIB "${MOQFFI_LIB_DIR}/${MOQFFI_LIB_NAME}")
+    set(MOQFFI_DLL_PATH "${MOQFFI_LIB_DIR}/${MOQFFI_DLL_NAME}")
+    set(MOQFFI_LINK_LIB "${MOQFFI_IMPORT_LIB}")
 elseif(APPLE)
     set(MOQFFI_LIB_NAME "libmoq_ffi.dylib")
+    set(MOQFFI_LINK_LIB "${MOQFFI_LIB_DIR}/${MOQFFI_LIB_NAME}")
 else()
     set(MOQFFI_LIB_NAME "libmoq_ffi.so")
+    set(MOQFFI_LINK_LIB "${MOQFFI_LIB_DIR}/${MOQFFI_LIB_NAME}")
 endif()
 
 # Include directories
@@ -30,9 +35,6 @@ include_directories(
     ${MOQFFI_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-
-# Link directories
-link_directories(${MOQFFI_LIB_DIR})
 
 # Common test utilities
 add_library(test_common STATIC
@@ -52,7 +54,7 @@ endif()
 # Macro to add a test executable
 macro(add_moq_test test_name source_file)
     add_executable(${test_name} ${source_file})
-    target_link_libraries(${test_name} test_common moq_ffi ${PLATFORM_LIBS})
+    target_link_libraries(${test_name} test_common ${MOQFFI_LINK_LIB} ${PLATFORM_LIBS})
 
     # Add test to CTest
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -62,6 +64,13 @@ macro(add_moq_test test_name source_file)
         set_target_properties(${test_name} PROPERTIES
             BUILD_RPATH "${MOQFFI_LIB_DIR}"
             INSTALL_RPATH "${MOQFFI_LIB_DIR}"
+        )
+    elseif(WIN32)
+        # Copy DLL to output directory on Windows
+        add_custom_command(TARGET ${test_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MOQFFI_DLL_PATH}"
+            "$<TARGET_FILE_DIR:${test_name}>"
         )
     endif()
 endmacro()
@@ -78,15 +87,15 @@ add_moq_test(test_memory_safety src/test_memory_safety.c)
 
 # Integration Tests (C++)
 add_executable(test_pubsub_integration src/test_pubsub_integration.cpp)
-target_link_libraries(test_pubsub_integration test_common moq_ffi ${PLATFORM_LIBS})
+target_link_libraries(test_pubsub_integration test_common ${MOQFFI_LINK_LIB} ${PLATFORM_LIBS})
 add_test(NAME test_pubsub_integration COMMAND test_pubsub_integration)
 
 add_executable(test_catalog_integration src/test_catalog_integration.cpp)
-target_link_libraries(test_catalog_integration test_common moq_ffi ${PLATFORM_LIBS})
+target_link_libraries(test_catalog_integration test_common ${MOQFFI_LINK_LIB} ${PLATFORM_LIBS})
 add_test(NAME test_catalog_integration COMMAND test_catalog_integration)
 
 add_executable(test_multi_client_integration src/test_multi_client_integration.cpp)
-target_link_libraries(test_multi_client_integration test_common moq_ffi ${PLATFORM_LIBS})
+target_link_libraries(test_multi_client_integration test_common ${MOQFFI_LINK_LIB} ${PLATFORM_LIBS})
 add_test(NAME test_multi_client_integration COMMAND test_multi_client_integration)
 
 # Set runtime path for C++ tests
@@ -99,6 +108,15 @@ if(UNIX)
         BUILD_RPATH "${MOQFFI_LIB_DIR}"
         INSTALL_RPATH "${MOQFFI_LIB_DIR}"
     )
+elseif(WIN32)
+    # Copy DLL to output directory for C++ tests on Windows
+    foreach(target test_pubsub_integration test_catalog_integration test_multi_client_integration)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MOQFFI_DLL_PATH}"
+            "$<TARGET_FILE_DIR:${target}>"
+        )
+    endforeach()
 endif()
 
 # Enable testing
