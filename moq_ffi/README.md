@@ -26,39 +26,45 @@ The C API is defined in `include/moq_ffi.h`. See the main repository README for 
 
 ## Testing
 
-The crate includes comprehensive unit tests covering all FFI functions:
+The library has three layers of testing to ensure production confidence. See [TEST_COVERAGE.md](TEST_COVERAGE.md) for detailed coverage information.
 
-**Run tests (stub backend):**
-```bash
-cargo test
-```
+### Quick Reference
 
-**Run tests (full backend - Draft 14):**
-```bash
-cargo test --features with_moq
-```
-
-**Run tests (full backend - Draft 07):**
+**Run unit tests (Rust, with Draft 07 backend):**
 ```bash
 cargo test --features with_moq_draft07
 ```
 
-**Code Coverage:**
+**Run C/C++ tests:**
 ```bash
-# Install cargo-llvm-cov
-cargo install cargo-llvm-cov
-
-# Run coverage (stub backend)
-cargo llvm-cov --lib
-
-# Run coverage (full backend)
-cargo llvm-cov --lib --features with_moq
+cd c_tests && mkdir build && cd build
+cmake ..
+cmake --build .
+ctest --output-on-failure
 ```
 
-**Coverage Results:**
-- Stub backend: 93%+ line coverage (63 tests)
-- Full backend: 69%+ line coverage (68 tests)
-- Total: 131 unit tests
+**Run integration tests (requires network):**
+```bash
+cargo test --features with_moq_draft07 \
+  --test cloudflare_relay_integration \
+  -- --ignored --nocapture
+```
+
+### What Passing Tests Mean
+
+| Test Layer | What It Verifies |
+|------------|------------------|
+| **Unit Tests** | FFI safety, null handling, panic protection, memory management |
+| **C/C++ Tests** | C header compatibility, callback mechanisms, cross-language integration |
+| **Integration Tests** | Real relay connectivity, protocol handshake, end-to-end pub/sub |
+
+**If all CI tests pass, the API is safe to use in production.** The integration tests provide additional confidence that the protocol works end-to-end with real relays.
+
+### Test Coverage Summary
+
+- **81 Rust unit tests** covering all FFI functions
+- **11 C/C++ test executables** covering API from C caller perspective
+- **10 integration tests** verifying real relay connectivity (Cloudflare)
 
 The test suite covers:
 - Lifecycle management (create/destroy operations)
@@ -68,6 +74,7 @@ The test suite covers:
 - Memory safety and resource cleanup
 - Thread-local error storage
 - Enum values and helper functions
+- Real network pub/sub workflows
 
 ## Features
 
