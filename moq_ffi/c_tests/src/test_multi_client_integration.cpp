@@ -4,8 +4,10 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cstdio>
 #include <atomic>
 #include <thread>
+#include <mutex>
 
 using namespace std;
 
@@ -229,9 +231,15 @@ void test_cross_client_pubsub() {
     }
 
     // Create subscribers
+    static constexpr size_t SUBSCRIBER_ID_SIZE = 32;
+    
     struct SubDataContext {
         atomic<int> packet_count{0};
-        string subscriber_id;
+        char subscriber_id[SUBSCRIBER_ID_SIZE];  // Fixed-size buffer set before callbacks start
+        
+        SubDataContext() : packet_count(0) {
+            subscriber_id[0] = '\0';
+        }
     };
 
     vector<SubDataContext> sub_data_contexts(NUM_SUBSCRIBERS);
@@ -239,14 +247,19 @@ void test_cross_client_pubsub() {
 
     MoqDataCallback sub_callback = +[](void* user_data, const uint8_t* data, size_t len) {
         SubDataContext* ctx = (SubDataContext*)user_data;
-        ctx->packet_count++;
+        int current_count = ++ctx->packet_count;
         cout << "[" << ctx->subscriber_id << "] Received " << len << " bytes "
-             << "(packet #" << ctx->packet_count << ")" << endl;
+             << "(packet #" << current_count << ")" << endl;
     };
 
     for (int i = 0; i < NUM_SUBSCRIBERS; i++) {
         if (sub_contexts[i].connected) {
-            sub_data_contexts[i].subscriber_id = sub_contexts[i].client_id;
+            // Copy subscriber_id before starting subscription (no concurrent access)
+            snprintf(sub_data_contexts[i].subscriber_id, 
+                     SUBSCRIBER_ID_SIZE,
+                     "%s",
+                     sub_contexts[i].client_id.c_str());
+            
             MoqSubscriber* sub = moq_subscribe(
                 sub_contexts[i].client, namespace_name, track_name,
                 sub_callback, &sub_data_contexts[i]);
@@ -281,7 +294,7 @@ void test_cross_client_pubsub() {
     // Check results
     cout << "\nSubscriber packet counts:" << endl;
     for (const auto& ctx : sub_data_contexts) {
-        if (!ctx.subscriber_id.empty()) {
+        if (ctx.subscriber_id[0] != '\0') {
             cout << "  " << ctx.subscriber_id << ": " << ctx.packet_count << " packets" << endl;
         }
     }

@@ -2,6 +2,7 @@
 #include "moq_ffi.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 void test_announce_namespace_null_client(void) {
     moq_init();

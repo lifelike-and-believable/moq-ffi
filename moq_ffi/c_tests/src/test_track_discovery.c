@@ -67,11 +67,10 @@ void test_subscribe_announces_null_callback(void) {
     MoqClient* client = moq_client_create();
     TEST_ASSERT_NOT_NULL(client, "Client should be created");
 
+    /* NULL callback is valid - it means "unregister" according to the API */
     MoqResult result = moq_subscribe_announces(client, NULL, NULL);
-    TEST_ASSERT_NEQ(result.code, MOQ_OK,
-                    "moq_subscribe_announces() with NULL callback should fail");
-    TEST_ASSERT_EQ(result.code, MOQ_ERROR_INVALID_ARGUMENT,
-                   "Should return INVALID_ARGUMENT for NULL callback");
+    TEST_ASSERT_EQ(result.code, MOQ_OK,
+                   "moq_subscribe_announces() with NULL callback should succeed (unregister)");
 
     moq_client_destroy(client);
 }
@@ -85,9 +84,10 @@ void test_subscribe_announces_not_connected(void) {
     TrackCallbackData cb_data = {0};
     MoqResult result = moq_subscribe_announces(client, track_callback, &cb_data);
 
-    /* Should fail when not connected */
-    TEST_ASSERT_NEQ(result.code, MOQ_OK,
-                    "Should fail to subscribe to announces without connection");
+    /* According to the API, the callback is stored and will activate on connect.
+     * This is expected to succeed even without connection. */
+    TEST_ASSERT_EQ(result.code, MOQ_OK,
+                   "moq_subscribe_announces() should succeed (stores callback for later)");
     printf("Subscribe announces without connection: code=%d\n", result.code);
 
     moq_client_destroy(client);

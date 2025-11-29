@@ -5,6 +5,7 @@
 #include <string>
 #include <cstring>
 #include <atomic>
+#include <mutex>
 
 using namespace std;
 
@@ -23,6 +24,7 @@ struct CatalogContext {
     vector<string> track_names;
     vector<string> codecs;
     atomic<bool> received{false};
+    mutex mtx;  // Protects track_names and codecs
 };
 
 struct ConnectionContext {
@@ -57,24 +59,28 @@ void catalog_callback(void* user_data, const MoqTrackInfo* tracks, size_t track_
     cout << "[CATALOG] Received catalog with " << track_count << " tracks:" << endl;
 
     ctx->callback_count++;
-    ctx->track_names.clear();
-    ctx->codecs.clear();
+    
+    {
+        lock_guard<mutex> lock(ctx->mtx);
+        ctx->track_names.clear();
+        ctx->codecs.clear();
 
-    for (size_t i = 0; i < track_count; i++) {
-        cout << "  Track #" << (i + 1) << ":" << endl;
-        cout << "    Name:        " << (tracks[i].name ? tracks[i].name : "null") << endl;
-        cout << "    Codec:       " << (tracks[i].codec ? tracks[i].codec : "null") << endl;
-        cout << "    MIME:        " << (tracks[i].mime_type ? tracks[i].mime_type : "null") << endl;
-        cout << "    Dimensions:  " << tracks[i].width << "x" << tracks[i].height << endl;
-        cout << "    Bitrate:     " << tracks[i].bitrate << endl;
-        cout << "    Sample Rate: " << tracks[i].sample_rate << endl;
-        cout << "    Language:    " << (tracks[i].language ? tracks[i].language : "null") << endl;
+        for (size_t i = 0; i < track_count; i++) {
+            cout << "  Track #" << (i + 1) << ":" << endl;
+            cout << "    Name:        " << (tracks[i].name ? tracks[i].name : "null") << endl;
+            cout << "    Codec:       " << (tracks[i].codec ? tracks[i].codec : "null") << endl;
+            cout << "    MIME:        " << (tracks[i].mime_type ? tracks[i].mime_type : "null") << endl;
+            cout << "    Dimensions:  " << tracks[i].width << "x" << tracks[i].height << endl;
+            cout << "    Bitrate:     " << tracks[i].bitrate << endl;
+            cout << "    Sample Rate: " << tracks[i].sample_rate << endl;
+            cout << "    Language:    " << (tracks[i].language ? tracks[i].language : "null") << endl;
 
-        if (tracks[i].name) {
-            ctx->track_names.push_back(tracks[i].name);
-        }
-        if (tracks[i].codec) {
-            ctx->codecs.push_back(tracks[i].codec);
+            if (tracks[i].name) {
+                ctx->track_names.push_back(tracks[i].name);
+            }
+            if (tracks[i].codec) {
+                ctx->codecs.push_back(tracks[i].codec);
+            }
         }
     }
 
@@ -144,10 +150,13 @@ void test_catalog_subscription() {
         cout << "\nReceived " << cat_ctx.callback_count << " catalog updates" << endl;
         TEST_ASSERT(cat_ctx.callback_count > 0, "Catalog callback invoked");
 
-        if (!cat_ctx.track_names.empty()) {
-            cout << "Discovered tracks:" << endl;
-            for (const auto& track_name : cat_ctx.track_names) {
-                cout << "  - " << track_name << endl;
+        {
+            lock_guard<mutex> lock(cat_ctx.mtx);
+            if (!cat_ctx.track_names.empty()) {
+                cout << "Discovered tracks:" << endl;
+                for (const auto& track_name : cat_ctx.track_names) {
+                    cout << "  - " << track_name << endl;
+                }
             }
         }
     } else {
@@ -198,7 +207,7 @@ void test_track_announce_subscription() {
         atomic<int> count{0};
     } announce_ctx;
 
-    MoqAnnounceCallback announce_callback = +[](void* user_data, const char* ns, const char* track) {
+    MoqTrackCallback announce_callback = +[](void* user_data, const char* ns, const char* track) {
         AnnounceContext* ctx = (AnnounceContext*)user_data;
         ctx->count++;
         cout << "[ANNOUNCE] Namespace: " << (ns ? ns : "null")

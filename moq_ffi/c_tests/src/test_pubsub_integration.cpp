@@ -7,6 +7,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <mutex>
 
 using namespace std;
 
@@ -32,6 +33,7 @@ struct SubscriberContext {
     atomic<int> packet_count{0};
     vector<ReceivedData> received_packets;
     atomic<bool> all_received{false};
+    mutex mtx;  // Protects received_packets
 };
 
 // Connection state for synchronization
@@ -73,7 +75,10 @@ void subscriber_data_callback(void* user_data, const uint8_t* data, size_t len) 
     received.data.assign(data, data + len);
     received.timestamp_ms = test_timestamp_ms();
 
-    ctx->received_packets.push_back(received);
+    {
+        lock_guard<mutex> lock(ctx->mtx);
+        ctx->received_packets.push_back(received);
+    }
     ctx->packet_count++;
 }
 
@@ -230,14 +235,17 @@ void test_basic_pubsub_text_data() {
                    "All text packets received");
 
         // Verify content matches
-        for (size_t i = 0; i < min(sub_ctx.received_packets.size(), text_packets.size()); i++) {
-            string received_text(
-                (char*)sub_ctx.received_packets[i].data.data(),
-                sub_ctx.received_packets[i].data.size());
+        {
+            lock_guard<mutex> lock(sub_ctx.mtx);
+            for (size_t i = 0; i < min(sub_ctx.received_packets.size(), text_packets.size()); i++) {
+                string received_text(
+                    (char*)sub_ctx.received_packets[i].data.data(),
+                    sub_ctx.received_packets[i].data.size());
 
-            TEST_ASSERT_STR_EQ(received_text.c_str(), text_packets[i].c_str(),
-                             "Received text matches sent text");
-            cout << "  Packet #" << (i + 1) << " verified: \"" << received_text << "\"" << endl;
+                TEST_ASSERT_STR_EQ(received_text.c_str(), text_packets[i].c_str(),
+                                 "Received text matches sent text");
+                cout << "  Packet #" << (i + 1) << " verified: \"" << received_text << "\"" << endl;
+            }
         }
     } else {
         TEST_ASSERT(true, "No packets received (relay may not echo)");
@@ -395,6 +403,7 @@ void test_binary_data_transfer() {
 
     if (sub_ctx.packet_count > 0) {
         // Verify binary data integrity
+        lock_guard<mutex> lock(sub_ctx.mtx);
         for (size_t i = 0; i < min(sub_ctx.received_packets.size(), binary_packets.size()); i++) {
             const auto& received = sub_ctx.received_packets[i].data;
             const auto& sent = binary_packets[i];
