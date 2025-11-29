@@ -27,6 +27,7 @@ void data_callback(void* user_data, const uint8_t* data, size_t len) {
         cb_data->last_data_len = len;
     } else {
         cb_data->last_data_len = 0;
+        printf("  Warning: malloc failed for %zu bytes\n", len);
     }
 
     printf("  Data callback: received %zu bytes\n", len);

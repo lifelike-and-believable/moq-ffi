@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cstdio>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -230,9 +231,11 @@ void test_cross_client_pubsub() {
     }
 
     // Create subscribers
+    static constexpr size_t SUBSCRIBER_ID_SIZE = 32;
+    
     struct SubDataContext {
         atomic<int> packet_count{0};
-        char subscriber_id[32];  // Fixed-size buffer set before callbacks start
+        char subscriber_id[SUBSCRIBER_ID_SIZE];  // Fixed-size buffer set before callbacks start
         
         SubDataContext() : packet_count(0) {
             subscriber_id[0] = '\0';
@@ -252,10 +255,10 @@ void test_cross_client_pubsub() {
     for (int i = 0; i < NUM_SUBSCRIBERS; i++) {
         if (sub_contexts[i].connected) {
             // Copy subscriber_id before starting subscription (no concurrent access)
-            strncpy(sub_data_contexts[i].subscriber_id, 
-                    sub_contexts[i].client_id.c_str(), 
-                    sizeof(sub_data_contexts[i].subscriber_id) - 1);
-            sub_data_contexts[i].subscriber_id[sizeof(sub_data_contexts[i].subscriber_id) - 1] = '\0';
+            snprintf(sub_data_contexts[i].subscriber_id, 
+                     SUBSCRIBER_ID_SIZE,
+                     "%s",
+                     sub_contexts[i].client_id.c_str());
             
             MoqSubscriber* sub = moq_subscribe(
                 sub_contexts[i].client, namespace_name, track_name,
