@@ -83,7 +83,7 @@ These tests verify:
 - ✅ Fully tested
 - ⚠️ Partially tested (unit tests only, or relay limitation)
 - ❌ Not tested at this layer
-- \* Relay limitation: Cloudflare relay does not forward announcements (documented limitation)
+- (*) Relay limitation: Cloudflare relay does not forward announcements (documented limitation)
 
 ## What "All Tests Pass" Means
 
