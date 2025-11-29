@@ -180,7 +180,7 @@ moq_announce_namespace(client, "my-namespace");
 
 // 3. Create publisher
 MoqPublisher* pub = moq_create_publisher_ex(
-    client, "my-namespace", "my-track", MOQ_DELIVERY_MODE_STREAM);
+    client, "my-namespace", "my-track", MOQ_DELIVERY_STREAM);
 
 // 4. Subscribe on different client
 MoqSubscriber* sub = moq_subscribe(
@@ -188,7 +188,7 @@ MoqSubscriber* sub = moq_subscribe(
 
 // 5. Publish data
 const char* message = "Hello, MoQ!";
-moq_publish_data(pub, (uint8_t*)message, strlen(message), MOQ_DELIVERY_MODE_STREAM);
+moq_publish_data(pub, (uint8_t*)message, strlen(message), MOQ_DELIVERY_STREAM);
 ```
 
 ### Example 2: Binary Data Transfer
@@ -202,7 +202,7 @@ for (int i = 0; i < 256; i++) {
 
 // Publish binary data
 moq_publish_data(publisher, binary_data.data(), binary_data.size(),
-                 MOQ_DELIVERY_MODE_DATAGRAM);
+                 MOQ_DELIVERY_DATAGRAM);
 ```
 
 ### Example 3: Catalog Discovery
@@ -210,10 +210,10 @@ moq_publish_data(publisher, binary_data.data(), binary_data.size(),
 ```cpp
 // Subscribe to catalog
 MoqSubscriber* catalog_sub = moq_subscribe_catalog(
-    client, "namespace", catalog_callback, &catalog_ctx);
+    client, "namespace", "catalog", catalog_callback, &catalog_ctx);
 
 // Catalog callback receives track information
-void catalog_callback(const MoqTrackInfo* tracks, size_t count, void* user_data) {
+void catalog_callback(void* user_data, const MoqTrackInfo* tracks, size_t count) {
     for (size_t i = 0; i < count; i++) {
         printf("Track: %s, Codec: %s, Resolution: %dx%d\n",
                tracks[i].name, tracks[i].codec,

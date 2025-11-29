@@ -2,6 +2,7 @@
 #include "moq_ffi.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Data callback tracking */
 typedef struct {
@@ -24,6 +25,8 @@ void data_callback(void* user_data, const uint8_t* data, size_t len) {
     if (cb_data->last_data) {
         memcpy(cb_data->last_data, data, len);
         cb_data->last_data_len = len;
+    } else {
+        cb_data->last_data_len = 0;
     }
 
     printf("  Data callback: received %zu bytes\n", len);
