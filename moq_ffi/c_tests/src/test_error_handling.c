@@ -80,8 +80,6 @@ void test_not_connected_errors(void) {
 }
 
 void test_result_code_ranges(void) {
-    moq_init();
-
     /* Verify all result codes are distinct */
     int codes[] = {
         MOQ_OK,
@@ -94,9 +92,12 @@ void test_result_code_ranges(void) {
         MOQ_ERROR_BUFFER_TOO_SMALL
     };
     int num_codes = sizeof(codes) / sizeof(codes[0]);
+    int i, j;
 
-    for (int i = 0; i < num_codes; i++) {
-        for (int j = i + 1; j < num_codes; j++) {
+    moq_init();
+
+    for (i = 0; i < num_codes; i++) {
+        for (j = i + 1; j < num_codes; j++) {
             TEST_ASSERT(codes[i] != codes[j], "Result codes should be distinct");
         }
     }

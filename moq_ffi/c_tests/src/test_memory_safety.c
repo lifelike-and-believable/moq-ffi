@@ -98,11 +98,14 @@ void test_large_data_handling(void) {
 }
 
 void test_repeated_create_destroy(void) {
+    int i;
+    MoqClient* client;
+
     moq_init();
 
     /* Create and destroy many clients to test for memory leaks */
-    for (int i = 0; i < 100; i++) {
-        MoqClient* client = moq_client_create();
+    for (i = 0; i < 100; i++) {
+        client = moq_client_create();
         TEST_ASSERT_NOT_NULL(client, "Client creation in loop");
         moq_client_destroy(client);
     }
@@ -111,30 +114,32 @@ void test_repeated_create_destroy(void) {
 }
 
 void test_concurrent_clients(void) {
+    /* Create multiple clients simultaneously */
+#define NUM_CLIENTS 10
+    MoqClient* clients[NUM_CLIENTS];
+    int i, j;
+
     moq_init();
 
-    /* Create multiple clients simultaneously */
-    const int NUM_CLIENTS = 10;
-    MoqClient* clients[NUM_CLIENTS];
-
-    for (int i = 0; i < NUM_CLIENTS; i++) {
+    for (i = 0; i < NUM_CLIENTS; i++) {
         clients[i] = moq_client_create();
         TEST_ASSERT_NOT_NULL(clients[i], "Multi-client creation");
     }
 
     /* All clients should be distinct */
-    for (int i = 0; i < NUM_CLIENTS; i++) {
-        for (int j = i + 1; j < NUM_CLIENTS; j++) {
+    for (i = 0; i < NUM_CLIENTS; i++) {
+        for (j = i + 1; j < NUM_CLIENTS; j++) {
             TEST_ASSERT(clients[i] != clients[j], "Clients should be distinct");
         }
     }
 
     /* Destroy all */
-    for (int i = 0; i < NUM_CLIENTS; i++) {
+    for (i = 0; i < NUM_CLIENTS; i++) {
         moq_client_destroy(clients[i]);
     }
 
     TEST_ASSERT(true, "Multiple concurrent clients handled");
+#undef NUM_CLIENTS
 }
 
 void test_null_callback_safety(void) {
